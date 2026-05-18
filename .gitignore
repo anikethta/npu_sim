@@ -1,0 +1,12 @@
+.venv/
+build/
+dist/
+*.egg-info/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+AGENTS.md
+systolic_array.html
+test.py

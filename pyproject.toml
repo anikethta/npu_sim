@@ -1,0 +1,28 @@
+[build-system]
+requires = ["scikit-build-core>=0.10", "pybind11>=2.12"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "npu-sim"
+version = "0.1.0"
+description = "A modular NPU simulation platform with a Python frontend and optimized C++ backend."
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [
+  { name = "NPU Sim Contributors" }
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+  "pybind11>=2.12",
+  "pytest>=8.0"
+]
+
+[tool.scikit-build]
+wheel.packages = ["npu_sim"]
+cmake.version = ">=3.20"
+
+[tool.pytest.ini_options]
+testpaths = ["tests/python"]
+pythonpath = ["."]
