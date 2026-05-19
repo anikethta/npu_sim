@@ -2,9 +2,38 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Mapping, Sequence
+
+
+RegisterValue = int | float
+RegisterValues = RegisterValue | Sequence[RegisterValue]
+
+
+def _is_pipeline_sequence(value: object) -> bool:
+    return isinstance(value, Sequence) and not isinstance(value, (str, bytes))
+
+
+def _validate_pipeline_register(
+    value: object, name: str, *, integer_only: bool = False
+) -> None:
+    values = value if _is_pipeline_sequence(value) else (value,)
+    for item in values:
+        if isinstance(item, bool):
+            raise ValueError(f"{name} register must not contain bool")
+        if integer_only and not isinstance(item, int):
+            raise ValueError(f"{name} register values must be integers")
+        if not integer_only and not isinstance(item, (int, float)):
+            raise ValueError(f"{name} register values must be numeric")
+        if name == "shift" and item < 0:
+            raise ValueError("requantization shift must be non-negative")
+
+
+def _to_native_pipeline_register(value: RegisterValues) -> dict[str, object]:
+    if _is_pipeline_sequence(value):
+        return {"per_column": True, "values": list(value)}
+    return {"per_column": False, "values": [value]}
 
 
 class InterconnectKind(str, Enum):
@@ -28,6 +57,12 @@ class PEDataflowMode(str, Enum):
 
     OUTPUT_STATIONARY = "output_stationary"
     WEIGHT_STATIONARY = "weight_stationary"
+
+
+class PipelinePlacement(str, Enum):
+    """Attachment points for post-processing pipeline modules."""
+
+    AFTER_SYSTOLIC_ARRAY = "after_systolic_array"
 
 
 @dataclass(frozen=True)
@@ -134,6 +169,97 @@ class PEOperandConfig:
 
 
 @dataclass(frozen=True)
+class BiasConfig:
+    """Register-like bias-adder pipeline configuration."""
+
+    enabled: bool = False
+    bias: RegisterValues = 0
+    format: NumericFormatConfig = field(
+        default_factory=lambda: NumericFormatConfig(
+            kind=NumericFormatKind.SIGNED_INT, bits=16
+        )
+    )
+    placement: PipelinePlacement | str = PipelinePlacement.AFTER_SYSTOLIC_ARRAY
+
+    def __post_init__(self) -> None:
+        if isinstance(self.placement, PipelinePlacement):
+            object.__setattr__(self, "placement", self.placement.value)
+        if not isinstance(self.placement, str) or not self.placement:
+            raise ValueError("bias placement must be a non-empty string")
+        _validate_pipeline_register(self.bias, "bias")
+        if self.format.kind is not NumericFormatKind.FLOAT:
+            _validate_pipeline_register(self.bias, "bias", integer_only=True)
+
+    def validate_for_size(self, size: int) -> None:
+        if _is_pipeline_sequence(self.bias) and len(self.bias) != size:
+            raise ValueError("bias vector length must match systolic array size")
+
+    def validate_precision(self, activation_bits: int, weight_bits: int) -> None:
+        if not self.enabled or self.format.kind is NumericFormatKind.FLOAT:
+            return
+        if self.format.bits <= max(activation_bits, weight_bits):
+            raise ValueError(
+                "bias format bits must be greater than activation/weight bits"
+            )
+
+    def to_native_dict(self) -> dict[str, object]:
+        return {
+            "enabled": self.enabled,
+            "format": self.format.to_native_dict(),
+            "bias": _to_native_pipeline_register(self.bias),
+            "placement": self.placement,
+        }
+
+
+@dataclass(frozen=True)
+class RequantizationConfig:
+    """Register-like output requantization pipeline configuration."""
+
+    enabled: bool = False
+    target: NumericFormatConfig = field(default_factory=NumericFormatConfig)
+    scale_multiplier: RegisterValues = 1
+    shift: int | Sequence[int] = 0
+    bias: RegisterValues | None = None
+    rounding: bool = True
+    placement: PipelinePlacement | str = PipelinePlacement.AFTER_SYSTOLIC_ARRAY
+
+    def __post_init__(self) -> None:
+        if isinstance(self.placement, PipelinePlacement):
+            object.__setattr__(self, "placement", self.placement.value)
+        if not isinstance(self.placement, str) or not self.placement:
+            raise ValueError("requantization placement must be a non-empty string")
+        _validate_pipeline_register(self.scale_multiplier, "scale_multiplier")
+        _validate_pipeline_register(self.shift, "shift", integer_only=True)
+        if self.bias is not None:
+            _validate_pipeline_register(self.bias, "bias")
+
+    def validate_for_size(self, size: int) -> None:
+        """Validate per-column register lengths against an array size."""
+
+        for name, value in (
+            ("scale_multiplier", self.scale_multiplier),
+            ("shift", self.shift),
+            ("bias", self.bias),
+        ):
+            if value is not None and _is_pipeline_sequence(value) and len(value) != size:
+                raise ValueError(
+                    f"requantization {name} vector length must match systolic array size"
+                )
+
+    def to_native_dict(self) -> dict[str, object]:
+        return {
+            "enabled": self.enabled,
+            "target": self.target.to_native_dict(),
+            "scale_multiplier": _to_native_pipeline_register(
+                self.scale_multiplier
+            ),
+            "shift": _to_native_pipeline_register(self.shift),
+            "rounding": self.rounding,
+            "placement": self.placement,
+        }
+
+
+@dataclass(frozen=True)
 class ProcessingElementConfig:
     """Configuration for a SystemC processing element module."""
 
@@ -184,6 +310,8 @@ class SystolicArrayConfig:
             kind=NumericFormatKind.SIGNED_INT, bits=32
         )
     )
+    bias: BiasConfig = field(default_factory=BiasConfig)
+    requantization: RequantizationConfig = field(default_factory=RequantizationConfig)
 
     def __post_init__(self) -> None:
         if not self.name:
@@ -196,6 +324,21 @@ class SystolicArrayConfig:
             object.__setattr__(
                 self, "dataflow_mode", PEDataflowMode(self.dataflow_mode)
             )
+        if self.requantization.bias is not None and not self.bias.enabled:
+            object.__setattr__(
+                self,
+                "bias",
+                BiasConfig(
+                    enabled=True,
+                    bias=self.requantization.bias,
+                    placement=self.requantization.placement,
+                ),
+            )
+        self.bias.validate_for_size(self.size)
+        self.bias.validate_precision(
+            self.activation.format.bits, self.weight.format.bits
+        )
+        self.requantization.validate_for_size(self.size)
 
     def to_native_dict(self) -> dict[str, object]:
         return {
@@ -206,6 +349,8 @@ class SystolicArrayConfig:
             "activation": self.activation.to_native_dict(),
             "weight": self.weight.to_native_dict(),
             "accumulator": self.accumulator.to_native_dict(),
+            "bias": self.bias.to_native_dict(),
+            "requantization": self.requantization.to_native_dict(),
         }
 
 

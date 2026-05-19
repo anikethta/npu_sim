@@ -154,13 +154,22 @@ PEMacResult SystemCBackend::mac(const std::string& pe_name,
 SystolicArrayResult SystemCBackend::run_systolic_array(
     const std::string& array_name, const PEInputMatrix& activations,
     const PEInputMatrix& weights, bool trace_enabled) {
+  return run_systolic_array_stream(array_name, {activations}, {weights},
+                                   trace_enabled);
+}
+
+SystolicArrayResult SystemCBackend::run_systolic_array_stream(
+    const std::string& array_name,
+    const PEInputMatrixBatch& activation_batches,
+    const PEInputMatrixBatch& weight_batches, bool trace_enabled) {
   const auto found = systolic_arrays_by_name_.find(array_name);
   if (found == systolic_arrays_by_name_.end()) {
     throw std::out_of_range("unknown systolic array: " + array_name);
   }
 
   SystolicArrayResult result =
-      found->second->run_matrix_multiply(activations, weights, trace_enabled);
+      found->second->run_matrix_multiply_stream(
+          activation_batches, weight_batches, trace_enabled);
   current_cycle_ = result.current_cycle;
   ++event_count_;
   return result;

@@ -10,3 +10,4 @@ __pycache__/
 AGENTS.md
 systolic_array.html
 test.py
+*.log

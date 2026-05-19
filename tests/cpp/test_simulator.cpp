@@ -107,6 +107,21 @@ npu_sim::SystolicArrayConfig systolic_array_config(
   return config;
 }
 
+npu_sim::SystolicArrayConfig requantized_systolic_array_config(
+    std::string name) {
+  npu_sim::SystolicArrayConfig config = systolic_array_config(name);
+  config.requantization.enabled = true;
+  config.requantization.target = signed_int_format(4);
+  config.requantization.scale_multiplier.per_column = true;
+  config.requantization.scale_multiplier.values = {3.0, 5.0};
+  config.requantization.shift.per_column = true;
+  config.requantization.shift.values = {1.0, 2.0};
+  config.bias.enabled = true;
+  config.bias.bias.per_column = true;
+  config.bias.bias.values = {0.0, -1.0};
+  return config;
+}
+
 npu_sim::PEInputValue pe_input(std::int64_t value) {
   npu_sim::PEInputValue input;
   input.is_float = false;
@@ -492,6 +507,61 @@ void test_systolic_array_weight_stationary_trace(
   expect(saw_weight_load, "weight-stationary trace should include loads");
 }
 
+void test_systolic_array_requantizes_outputs(
+    npu_sim::SystolicArray& array) {
+  const npu_sim::SystolicArrayResult result = array.run_matrix_multiply(
+      small_activation_matrix(), small_weight_matrix(), true);
+
+  expect(result.outputs[0][0].integer_value == 6,
+         "requantized C00 should include multiply, rounding, and shift");
+  expect(result.outputs[0][1].integer_value == -2,
+         "requantized C01 should use per-column bias and arithmetic shift");
+  expect(result.outputs[1][0].integer_value == 7,
+         "requantized C10 should saturate to signed INT4 max");
+  expect(result.outputs[1][1].integer_value == 1,
+         "requantized C11 should use per-column registers");
+  expect(result.outputs[0][0].format.bits == 4,
+         "requantized outputs should use target format");
+
+  bool saw_requant_shift = false;
+  bool saw_requant_saturate = false;
+  bool saw_bias_add = false;
+  bool saw_requantized_output_emit = false;
+  npu_sim::Cycle pre_requant_cycle = 0;
+  npu_sim::Cycle output_emit_cycle = 0;
+  for (const npu_sim::SystolicTraceEvent& event : result.trace) {
+    if (event.event == "pre_requant_output" && event.row == 1 &&
+        event.col == 0 && event.value == 7.0) {
+      pre_requant_cycle = event.cycle;
+    }
+    if (event.event == "requant_shift" && event.col == 1 && event.shift == 2) {
+      saw_requant_shift = true;
+    }
+    if (event.event == "bias_add" && event.col == 1 && event.bias == -1.0 &&
+        event.bias_format_bits == 16) {
+      saw_bias_add = true;
+    }
+    if (event.event == "requant_saturate" && event.row == 1 &&
+        event.col == 0 && event.value == 7.0) {
+      saw_requant_saturate = true;
+    }
+    if (event.event == "output_emit" && event.row == 1 && event.col == 0 &&
+        event.value == 7.0) {
+      saw_requantized_output_emit = true;
+      output_emit_cycle = event.cycle;
+    }
+  }
+  expect(pre_requant_cycle != 0,
+         "PE should emit pre-quantized accumulator value before requantization");
+  expect(output_emit_cycle == pre_requant_cycle + 5,
+         "requantized output should emerge after five pipeline cycles");
+  expect(saw_bias_add, "bias adder trace should include high-precision bias");
+  expect(saw_requant_shift, "requantization trace should include shift metadata");
+  expect(saw_requant_saturate, "requantization trace should include saturation");
+  expect(saw_requantized_output_emit,
+         "output_emit should carry final requantized value");
+}
+
 }  // namespace
 
 int main() {
@@ -556,6 +626,9 @@ int main() {
       "test_weight_stationary_array",
       systolic_array_config("weight_stationary_array",
                             npu_sim::PEDataflowMode::WeightStationary));
+  npu_sim::SystolicArray requantized_array(
+      "test_requantized_array",
+      requantized_systolic_array_config("requantized_array"));
   npu_sim::SimulatorConfig simulator_config;
   simulator_config.core_count = 4;
   simulator_config.scratchpads.push_back(
@@ -581,6 +654,7 @@ int main() {
   test_pe_accepts_dataflow_modes(output_stationary_pe, weight_stationary_pe);
   test_systolic_array_output_stationary_trace(output_stationary_array);
   test_systolic_array_weight_stationary_trace(weight_stationary_array);
+  test_systolic_array_requantizes_outputs(requantized_array);
   test_systemc_backend_advances_cycles();
   return 0;
 }

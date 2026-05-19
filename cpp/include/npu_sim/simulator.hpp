@@ -44,6 +44,10 @@ class Simulator {
                                          const PEInputMatrix& activations,
                                          const PEInputMatrix& weights,
                                          bool trace_enabled);
+  SystolicArrayResult run_systolic_array_stream(
+      const std::string& array_name,
+      const PEInputMatrixBatch& activation_batches,
+      const PEInputMatrixBatch& weight_batches, bool trace_enabled);
   SimulatorStats run();
   SimulatorStats run_until(Cycle max_cycle);
   SimulatorStats stats() const;

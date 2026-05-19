@@ -54,6 +54,39 @@ npu_sim::PEOperandConfig parse_pe_operand(const py::dict& operand) {
   return native_operand;
 }
 
+npu_sim::RequantizationRegister parse_requantization_register(
+    const py::dict& reg) {
+  npu_sim::RequantizationRegister native_reg;
+  native_reg.per_column = reg["per_column"].cast<bool>();
+  native_reg.values = reg["values"].cast<std::vector<double>>();
+  return native_reg;
+}
+
+npu_sim::BiasAdderConfig parse_bias(const py::dict& bias) {
+  npu_sim::BiasAdderConfig native_bias;
+  native_bias.enabled = bias["enabled"].cast<bool>();
+  native_bias.format = parse_numeric_format(bias["format"].cast<py::dict>());
+  native_bias.bias =
+      parse_requantization_register(bias["bias"].cast<py::dict>());
+  native_bias.placement = bias["placement"].cast<std::string>();
+  return native_bias;
+}
+
+npu_sim::RequantizationConfig parse_requantization(
+    const py::dict& requantization) {
+  npu_sim::RequantizationConfig native_requantization;
+  native_requantization.enabled = requantization["enabled"].cast<bool>();
+  native_requantization.target =
+      parse_numeric_format(requantization["target"].cast<py::dict>());
+  native_requantization.scale_multiplier = parse_requantization_register(
+      requantization["scale_multiplier"].cast<py::dict>());
+  native_requantization.shift =
+      parse_requantization_register(requantization["shift"].cast<py::dict>());
+  native_requantization.rounding = requantization["rounding"].cast<bool>();
+  native_requantization.placement = requantization["placement"].cast<std::string>();
+  return native_requantization;
+}
+
 npu_sim::SystolicArrayConfig parse_systolic_array(const py::dict& array) {
   npu_sim::SystolicArrayConfig array_config;
   array_config.name = array["name"].cast<std::string>();
@@ -67,6 +100,9 @@ npu_sim::SystolicArrayConfig parse_systolic_array(const py::dict& array) {
   array_config.weight = parse_pe_operand(array["weight"].cast<py::dict>());
   array_config.accumulator =
       parse_numeric_format(array["accumulator"].cast<py::dict>());
+  array_config.bias = parse_bias(array["bias"].cast<py::dict>());
+  array_config.requantization =
+      parse_requantization(array["requantization"].cast<py::dict>());
   return array_config;
 }
 
@@ -180,6 +216,18 @@ npu_sim::PEInputMatrix parse_pe_input_matrix(const py::object& matrix) {
   return native_matrix;
 }
 
+npu_sim::PEInputMatrixBatch parse_pe_input_matrix_batch(
+    const py::object& matrices) {
+  npu_sim::PEInputMatrixBatch native_matrices;
+  const py::sequence batch = matrices.cast<py::sequence>();
+  native_matrices.reserve(static_cast<std::size_t>(py::len(batch)));
+  for (const py::handle matrix : batch) {
+    native_matrices.push_back(parse_pe_input_matrix(
+        py::reinterpret_borrow<py::object>(matrix)));
+  }
+  return native_matrices;
+}
+
 std::string numeric_format_kind_to_string(npu_sim::NumericFormatKind kind) {
   switch (kind) {
     case npu_sim::NumericFormatKind::SignedInt:
@@ -218,6 +266,7 @@ py::dict trace_event_to_dict(const npu_sim::SystolicTraceEvent& event) {
   out["cycle"] = event.cycle;
   out["event"] = event.event;
   out["array"] = event.array;
+  out["batch"] = event.batch;
   out["row"] = event.row < 0 ? py::none() : py::cast(event.row);
   out["col"] = event.col < 0 ? py::none() : py::cast(event.col);
   out["k"] = event.k < 0 ? py::none() : py::cast(event.k);
@@ -230,24 +279,57 @@ py::dict trace_event_to_dict(const npu_sim::SystolicTraceEvent& event) {
   } else {
     out["value"] = py::none();
   }
+  if (event.has_requantization_metadata) {
+    py::dict metadata;
+    metadata["scale_multiplier"] = event.scale_multiplier;
+    metadata["shift"] = event.shift;
+    metadata["placement"] = event.placement;
+    metadata["target_kind"] = event.target_kind;
+    metadata["target_bits"] = event.target_bits;
+    out["requantization"] = std::move(metadata);
+  } else {
+    out["requantization"] = py::none();
+  }
+  if (event.has_bias_metadata) {
+    py::dict metadata;
+    metadata["bias"] = event.bias;
+    metadata["format_kind"] = event.bias_format_kind;
+    metadata["format_bits"] = event.bias_format_bits;
+    metadata["placement"] = event.placement;
+    out["bias"] = std::move(metadata);
+  } else {
+    out["bias"] = py::none();
+  }
   return out;
 }
 
 py::dict systolic_result_to_dict(const npu_sim::SystolicArrayResult& result) {
   py::dict out;
-  py::list outputs;
-  for (const auto& row : result.outputs) {
-    py::list output_row;
-    for (const npu_sim::PEMacResult& value : row) {
-      output_row.append(mac_result_to_dict(value)["value"]);
-    }
-    outputs.append(std::move(output_row));
+  auto output_matrix_to_list =
+      [](const std::vector<std::vector<npu_sim::PEMacResult>>& matrix) {
+        py::list outputs;
+        for (const auto& row : matrix) {
+          py::list output_row;
+          for (const npu_sim::PEMacResult& value : row) {
+            output_row.append(mac_result_to_dict(value)["value"]);
+          }
+          outputs.append(std::move(output_row));
+        }
+        return outputs;
+      };
+
+  py::list output_batches;
+  for (const auto& matrix : result.output_batches) {
+    output_batches.append(output_matrix_to_list(matrix));
   }
+  py::list outputs = output_matrix_to_list(result.outputs);
   py::list trace;
   for (const npu_sim::SystolicTraceEvent& event : result.trace) {
     trace.append(trace_event_to_dict(event));
   }
   out["outputs"] = std::move(outputs);
+  out["output_batches"] = std::move(output_batches);
+  out["batch_count"] = result.output_batches.size();
   out["current_cycle"] = result.current_cycle;
   out["operation_count"] = result.operation_count;
   out["dataflow_mode"] =
@@ -287,6 +369,18 @@ PYBIND11_MODULE(_native, m) {
            },
            py::arg("array_name"), py::arg("activations"), py::arg("weights"),
            py::arg("trace_enabled") = true)
+      .def("run_systolic_array_stream",
+           [](npu_sim::Simulator& simulator, const std::string& array_name,
+              const py::object& activation_batches,
+              const py::object& weight_batches, bool trace_enabled) {
+             return systolic_result_to_dict(
+                 simulator.run_systolic_array_stream(
+                     array_name, parse_pe_input_matrix_batch(activation_batches),
+                     parse_pe_input_matrix_batch(weight_batches),
+                     trace_enabled));
+           },
+           py::arg("array_name"), py::arg("activation_batches"),
+           py::arg("weight_batches"), py::arg("trace_enabled") = true)
       .def("run",
            [](npu_sim::Simulator& simulator) {
              return stats_to_dict(simulator.run());

@@ -47,6 +47,14 @@ SystolicArrayResult Simulator::run_systolic_array(
                                       trace_enabled);
 }
 
+SystolicArrayResult Simulator::run_systolic_array_stream(
+    const std::string& array_name,
+    const PEInputMatrixBatch& activation_batches,
+    const PEInputMatrixBatch& weight_batches, bool trace_enabled) {
+  return backend_->run_systolic_array_stream(
+      array_name, activation_batches, weight_batches, trace_enabled);
+}
+
 SimulatorStats Simulator::run() { return stats(); }
 
 SimulatorStats Simulator::run_until(Cycle max_cycle) {

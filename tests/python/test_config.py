@@ -1,6 +1,7 @@
 import pytest
 
 from npu_sim import (
+    BiasConfig,
     CoreConfig,
     InterconnectConfig,
     InterconnectKind,
@@ -11,6 +12,7 @@ from npu_sim import (
     PEDataflowMode,
     PEOperandConfig,
     ProcessingElementConfig,
+    RequantizationConfig,
     SRAMScratchpadConfig,
     SystolicArrayConfig,
 )
@@ -145,6 +147,66 @@ def test_processing_element_config_exports_native_shape():
     ]
 
 
+def test_systolic_array_requantization_config_exports_native_shape():
+    int3 = NumericFormatConfig(kind=NumericFormatKind.SIGNED_INT, bits=3)
+    int4 = NumericFormatConfig(kind=NumericFormatKind.SIGNED_INT, bits=4)
+    config = SystolicArrayConfig(
+        name="array0",
+        size=2,
+        activation=PEOperandConfig(format=int3),
+        weight=PEOperandConfig(format=int3),
+        bias=BiasConfig(enabled=True, bias=[0, -1]),
+        requantization=RequantizationConfig(
+            enabled=True,
+            target=int4,
+            scale_multiplier=[3, 5],
+            shift=[1, 2],
+        ),
+    )
+
+    native_dict = config.to_native_dict()
+    bias_native = native_dict["bias"]
+    native = native_dict["requantization"]
+
+    assert bias_native == {
+        "enabled": True,
+        "format": {
+            "kind": "signed_int",
+            "bits": 16,
+            "exponent_bits": 0,
+            "mantissa_bits": 0,
+        },
+        "bias": {"per_column": True, "values": [0, -1]},
+        "placement": "after_systolic_array",
+    }
+
+    assert native == {
+        "enabled": True,
+        "target": {
+            "kind": "signed_int",
+            "bits": 4,
+            "exponent_bits": 0,
+            "mantissa_bits": 0,
+        },
+        "scale_multiplier": {"per_column": True, "values": [3, 5]},
+        "shift": {"per_column": True, "values": [1, 2]},
+        "rounding": True,
+        "placement": "after_systolic_array",
+    }
+
+
+def test_systolic_array_requantization_validates_registers():
+    with pytest.raises(ValueError, match="shift"):
+        RequantizationConfig(shift=-1)
+
+    with pytest.raises(ValueError, match="vector length"):
+        SystolicArrayConfig(
+            name="array0",
+            size=2,
+            requantization=RequantizationConfig(scale_multiplier=[1, 2, 3]),
+        )
+
+
 def test_processing_element_config_accepts_float_format_metadata():
     fp8 = NumericFormatConfig(
         kind=NumericFormatKind.FLOAT, bits=8, exponent_bits=4, mantissa_bits=3
@@ -205,6 +267,30 @@ def test_systolic_array_config_exports_native_shape():
                 "bits": 32,
                 "exponent_bits": 0,
                 "mantissa_bits": 0,
+            },
+            "bias": {
+                "enabled": False,
+                "format": {
+                    "kind": "signed_int",
+                    "bits": 16,
+                    "exponent_bits": 0,
+                    "mantissa_bits": 0,
+                },
+                "bias": {"per_column": False, "values": [0]},
+                "placement": "after_systolic_array",
+            },
+            "requantization": {
+                "enabled": False,
+                "target": {
+                    "kind": "signed_int",
+                    "bits": 8,
+                    "exponent_bits": 0,
+                    "mantissa_bits": 0,
+                },
+                "scale_multiplier": {"per_column": False, "values": [1]},
+                "shift": {"per_column": False, "values": [0]},
+                "rounding": True,
+                "placement": "after_systolic_array",
             },
         }
     ]

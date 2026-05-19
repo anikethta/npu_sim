@@ -33,6 +33,10 @@ class SystemCBackend {
                                          const PEInputMatrix& activations,
                                          const PEInputMatrix& weights,
                                          bool trace_enabled);
+  SystolicArrayResult run_systolic_array_stream(
+      const std::string& array_name,
+      const PEInputMatrixBatch& activation_batches,
+      const PEInputMatrixBatch& weight_batches, bool trace_enabled);
   Cycle current_cycle() const;
   std::uint64_t component_count() const;
   std::uint64_t event_count() const;

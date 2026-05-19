@@ -27,6 +27,7 @@ endif()
 
 add_library(npu_sim_core
   cpp/src/backend/systemc/systemc_backend.cpp
+  cpp/src/modules/output_pipeline.cpp
   cpp/src/modules/processing_element.cpp
   cpp/src/modules/sram_scratchpad.cpp
   cpp/src/modules/systolic_array.cpp
