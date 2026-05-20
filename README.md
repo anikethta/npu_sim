@@ -92,6 +92,9 @@ ctest --test-dir build --output-on-failure
 - Weight-stationary batching uses one logical weight FIFO stream. Later batches
   may be transferred from that FIFO into PE shadow registers while an earlier
   batch is computing; there is no separate shadow-weight FIFO.
+- Weight-stationary streams may provide fewer weight batches than activation
+  batches. The last loaded weight batch remains resident in the PEs and is
+  reused until another weight batch is supplied.
 - `NPU.visualize_systolic_array(...)` writes a self-contained HTML trace viewer
   with play/pause, stepping, speed control, PE-grid highlighting, FIFO/shadow
   activity, and per-batch outputs.

@@ -11,10 +11,13 @@ from npu_sim import (
     NPUConfig,
     PEDataflowMode,
     PEOperandConfig,
+    PipelinePlacement,
     ProcessingElementConfig,
     RequantizationConfig,
     SRAMScratchpadConfig,
+    SPUOutputFIFOConfig,
     SystolicArrayConfig,
+    VectorProcessingUnitConfig,
 )
 
 
@@ -28,6 +31,7 @@ def test_default_config_exports_native_dict():
     assert native["latencies"]["noop"] == 1
     assert native["scratchpads"] == []
     assert native["processing_elements"] == []
+    assert native["vector_processing_units"] == []
     assert native["systolic_arrays"] == []
 
 
@@ -195,6 +199,23 @@ def test_systolic_array_requantization_config_exports_native_shape():
     }
 
 
+def test_systolic_array_bias_config_exports_inside_pe_placement():
+    int3 = NumericFormatConfig(kind=NumericFormatKind.SIGNED_INT, bits=3)
+    config = SystolicArrayConfig(
+        name="array0",
+        size=2,
+        activation=PEOperandConfig(format=int3),
+        weight=PEOperandConfig(format=int3),
+        bias=BiasConfig(
+            enabled=True,
+            bias=[0, -1],
+            placement=PipelinePlacement.INSIDE_PE,
+        ),
+    )
+
+    assert config.to_native_dict()["bias"]["placement"] == "inside_pe"
+
+
 def test_systolic_array_requantization_validates_registers():
     with pytest.raises(ValueError, match="shift"):
         RequantizationConfig(shift=-1)
@@ -279,6 +300,8 @@ def test_systolic_array_config_exports_native_shape():
                 "bias": {"per_column": False, "values": [0]},
                 "placement": "after_systolic_array",
             },
+            "spu_output_fifo": {"depth": 16, "latency_cycles": 0},
+            "output_vpu": None,
             "requantization": {
                 "enabled": False,
                 "target": {
@@ -307,6 +330,83 @@ def test_systolic_array_config_exports_native_shape():
 def test_systolic_array_config_validates_inputs(kwargs, match):
     with pytest.raises(ValueError, match=match):
         SystolicArrayConfig(**kwargs)
+
+
+def test_npu_exports_top_level_vpu_and_systolic_output_vpu_reference():
+    config = NPUConfig(
+        vector_processing_units=[
+            VectorProcessingUnitConfig(
+                name="vpu0", enabled=True, lanes=4, latency_cycles=2
+            )
+        ],
+        systolic_arrays=[
+            SystolicArrayConfig(
+                name="array0",
+                spu_output_fifo=SPUOutputFIFOConfig(depth=8, latency_cycles=1),
+                output_vpu="vpu0",
+                requantization=RequantizationConfig(
+                    placement=PipelinePlacement.AFTER_VPU
+                ),
+            )
+        ],
+    )
+
+    native = config.to_native_dict()
+
+    assert native["vector_processing_units"] == [
+        {
+            "name": "vpu0",
+            "enabled": True,
+            "lanes": 4,
+            "latency_cycles": 2,
+            "instruction_memory": {
+                "name": "vpu_instruction_sram",
+                "num_rw_ports": 1,
+                "num_r_ports": 0,
+                "num_w_ports": 0,
+                "word_size": 32,
+                "write_size": 32,
+                "num_words": 64,
+                "read_latency_cycles": 1,
+                "write_latency_cycles": 1,
+            },
+        }
+    ]
+    assert native["systolic_arrays"][0]["spu_output_fifo"] == {
+        "depth": 8,
+        "latency_cycles": 1,
+    }
+    assert native["systolic_arrays"][0]["output_vpu"] == "vpu0"
+    assert native["systolic_arrays"][0]["requantization"]["placement"] == "after_vpu"
+
+
+def test_systolic_array_requantization_after_vpu_requires_output_vpu():
+    with pytest.raises(ValueError, match="output_vpu"):
+        SystolicArrayConfig(
+            name="array0",
+            requantization=RequantizationConfig(
+                placement=PipelinePlacement.AFTER_VPU
+            ),
+        )
+
+
+def test_vpu_config_validates_inputs():
+    with pytest.raises(ValueError, match="name"):
+        VectorProcessingUnitConfig(name="")
+
+    with pytest.raises(ValueError, match="lanes"):
+        VectorProcessingUnitConfig(name="vpu0", lanes=0)
+
+    with pytest.raises(ValueError, match="latency"):
+        VectorProcessingUnitConfig(name="vpu0", latency_cycles=-1)
+
+
+def test_systolic_array_rejects_empty_output_vpu_reference():
+    with pytest.raises(ValueError, match="output_vpu"):
+        SystolicArrayConfig(
+            name="array0",
+            output_vpu="",
+        )
 
 
 @pytest.mark.parametrize(

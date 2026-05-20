@@ -16,7 +16,9 @@ from npu_sim.config import (
     ProcessingElementConfig,
     RequantizationConfig,
     SRAMScratchpadConfig,
+    SPUOutputFIFOConfig,
     SystolicArrayConfig,
+    VectorProcessingUnitConfig,
 )
 from npu_sim.npu import NPU
 
@@ -37,5 +39,7 @@ __all__ = [
     "ProcessingElementConfig",
     "RequantizationConfig",
     "SRAMScratchpadConfig",
+    "SPUOutputFIFOConfig",
     "SystolicArrayConfig",
+    "VectorProcessingUnitConfig",
 ]

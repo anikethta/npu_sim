@@ -8,6 +8,6 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 AGENTS.md
-systolic_array.html
 test.py
 *.log
+build

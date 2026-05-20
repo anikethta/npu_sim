@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
+#include <map>
 #include <string>
 #include <stdexcept>
 
@@ -119,6 +120,41 @@ npu_sim::SystolicArrayConfig requantized_systolic_array_config(
   config.bias.enabled = true;
   config.bias.bias.per_column = true;
   config.bias.bias.values = {0.0, -1.0};
+  return config;
+}
+
+npu_sim::SystolicArrayConfig after_vpu_requantized_systolic_array_config(
+    std::string name) {
+  npu_sim::SystolicArrayConfig config = requantized_systolic_array_config(name);
+  config.output_vpu = "vpu0";
+  config.requantization.placement = "after_vpu";
+  return config;
+}
+
+npu_sim::SystolicArrayConfig inside_pe_bias_systolic_array_config(
+    std::string name) {
+  npu_sim::SystolicArrayConfig config = requantized_systolic_array_config(name);
+  config.bias.placement = "inside_pe";
+  return config;
+}
+
+npu_sim::SystolicArrayConfig inside_pe_bias_weight_stationary_config(
+    std::string name) {
+  npu_sim::SystolicArrayConfig config =
+      systolic_array_config(name, npu_sim::PEDataflowMode::WeightStationary);
+  config.bias.enabled = true;
+  config.bias.placement = "inside_pe";
+  config.bias.bias.per_column = true;
+  config.bias.bias.values = {0.0, -1.0};
+  return config;
+}
+
+npu_sim::VectorProcessingUnitConfig vpu_config(std::string name) {
+  npu_sim::VectorProcessingUnitConfig config;
+  config.name = name;
+  config.enabled = true;
+  config.lanes = 2;
+  config.latency_cycles = 1;
   return config;
 }
 
@@ -459,11 +495,15 @@ void test_systolic_array_output_stationary_trace(
          "systolic output C11 should match matmul");
   expect(result.operation_count == 8,
          "2x2 systolic matmul should perform size^3 MACs");
-  expect(result.current_cycle == start_cycle + 4,
+  expect(result.current_cycle == start_cycle + 5,
          "output-stationary systolic run should advance to final emit cycle");
 
   std::uint64_t activation_inject_counts[3] = {0, 0, 0};
   bool saw_first_commit = false;
+  bool saw_fifo_push = false;
+  bool saw_deasserted_dequeue_request = false;
+  bool saw_fifo_dequeue = false;
+  std::map<npu_sim::Cycle, bool> fifo_push_by_write_cycle;
   for (const npu_sim::SystolicTraceEvent& event : result.trace) {
     if (event.event == "inject_activation") {
       const npu_sim::Cycle relative_cycle = event.cycle - start_cycle;
@@ -474,6 +514,21 @@ void test_systolic_array_output_stationary_trace(
     if (event.event == "mac_commit" && event.cycle == start_cycle + 1) {
       saw_first_commit = true;
     }
+    if (event.event == "spu_output_fifo_push") {
+      saw_fifo_push = true;
+      fifo_push_by_write_cycle[event.cycle + 1] = true;
+      expect(event.lanes.size() == 2,
+             "size-2 array should still bank raw SPU FIFO entries");
+    }
+    if (event.event == "spu_output_fifo_dequeue_request" &&
+        !event.dequeue_asserted) {
+      saw_deasserted_dequeue_request = true;
+      expect(fifo_push_by_write_cycle[event.cycle],
+             "SPU FIFO dequeue request should occur when the write is visible");
+    }
+    if (event.event == "spu_output_fifo_dequeue") {
+      saw_fifo_dequeue = true;
+    }
   }
 
   expect(activation_inject_counts[0] == 1,
@@ -483,6 +538,11 @@ void test_systolic_array_output_stationary_trace(
   expect(activation_inject_counts[2] == 1,
          "third cycle should inject one activation");
   expect(saw_first_commit, "1-cycle MAC should commit one cycle after start");
+  expect(saw_fifo_push, "raw SPU outputs should enqueue into the SPU FIFO");
+  expect(saw_deasserted_dequeue_request,
+         "array without an output VPU should deassert FIFO dequeue");
+  expect(!saw_fifo_dequeue,
+         "array without an output VPU should leave FIFO entries queued");
 }
 
 void test_systolic_array_weight_stationary_trace(
@@ -505,6 +565,45 @@ void test_systolic_array_weight_stationary_trace(
     }
   }
   expect(saw_weight_load, "weight-stationary trace should include loads");
+}
+
+void test_systolic_array_weight_stationary_reuses_resident_weights(
+    npu_sim::SystolicArray& array) {
+  const npu_sim::PEInputMatrixBatch activation_batches{
+      small_activation_matrix(),
+      {
+          {pe_input(2), pe_input(0)},
+          {pe_input(1), pe_input(-1)},
+      },
+  };
+  const npu_sim::PEInputMatrixBatch weight_batches{small_weight_matrix()};
+  const npu_sim::SystolicArrayResult result =
+      array.run_matrix_multiply_stream(activation_batches, weight_batches, true);
+
+  expect(result.output_batches[0][0][0].integer_value == 4,
+         "first activation batch should use initially loaded weights");
+  expect(result.output_batches[1][0][0].integer_value == 4,
+         "second activation batch should reuse resident C00 weight path");
+  expect(result.output_batches[1][0][1].integer_value == 2,
+         "second activation batch should reuse resident C01 weight path");
+
+  bool saw_reuse = false;
+  bool saw_batch_one_weight_fifo = false;
+  for (const npu_sim::SystolicTraceEvent& event : result.trace) {
+    if (event.event == "stationary_weight_reuse" && event.batch == 1) {
+      saw_reuse = true;
+    }
+    if ((event.event == "weight_fifo_push" ||
+         event.event == "weight_fifo_pop") &&
+        event.batch == 1) {
+      saw_batch_one_weight_fifo = true;
+    }
+  }
+
+  expect(saw_reuse,
+         "weight-stationary stream should trace resident weight reuse");
+  expect(!saw_batch_one_weight_fifo,
+         "resident weight reuse should not consume another weight FIFO batch");
 }
 
 void test_systolic_array_requantizes_outputs(
@@ -553,13 +652,244 @@ void test_systolic_array_requantizes_outputs(
   }
   expect(pre_requant_cycle != 0,
          "PE should emit pre-quantized accumulator value before requantization");
-  expect(output_emit_cycle == pre_requant_cycle + 5,
-         "requantized output should emerge after five pipeline cycles");
+  expect(output_emit_cycle == pre_requant_cycle + 6,
+         "requantized output should emerge after the implicit FIFO write plus five pipeline cycles");
   expect(saw_bias_add, "bias adder trace should include high-precision bias");
   expect(saw_requant_shift, "requantization trace should include shift metadata");
   expect(saw_requant_saturate, "requantization trace should include saturation");
   expect(saw_requantized_output_emit,
          "output_emit should carry final requantized value");
+}
+
+void test_systolic_array_can_requantize_after_vpu(
+    npu_sim::SystolicArray& array, npu_sim::VectorProcessingUnit& vpu) {
+  array.attach_output_vpu(&vpu);
+  const npu_sim::SystolicArrayResult result = array.run_matrix_multiply(
+      small_activation_matrix(), small_weight_matrix(), true);
+
+  expect(result.outputs[0][0].integer_value == 6,
+         "post-VPU requantized C00 should match pass-through VPU output");
+  expect(result.outputs[1][0].integer_value == 7,
+         "post-VPU requantized C10 should still saturate");
+
+  bool saw_spu_fifo = false;
+  bool saw_vpu = false;
+  bool saw_after_vpu_requant = false;
+  bool saw_pre_requant = false;
+  bool saw_invalid_fifo_lane = false;
+  bool saw_fifo_dequeue_request = false;
+  bool saw_fifo_dequeue = false;
+  bool saw_fifo_empty = false;
+  std::map<npu_sim::Cycle, std::uint64_t> fifo_pushes_by_cycle;
+  std::map<npu_sim::Cycle, bool> fifo_push_by_write_cycle;
+  std::map<npu_sim::Cycle, bool> dequeue_request_by_cycle;
+  for (const npu_sim::SystolicTraceEvent& event : result.trace) {
+    if (event.event == "spu_output_fifo_push") {
+      saw_spu_fifo = true;
+      ++fifo_pushes_by_cycle[event.cycle];
+      fifo_push_by_write_cycle[event.cycle + 1] = true;
+      expect(event.lanes.size() == 2,
+             "size-2 array should emit two-lane SPU FIFO entries");
+      for (const npu_sim::SPUOutputFIFOLane& lane : event.lanes) {
+        if (!lane.valid && lane.value == 0.0) {
+          saw_invalid_fifo_lane = true;
+        }
+      }
+    }
+    if (event.event == "spu_output_fifo_dequeue_request") {
+      saw_fifo_dequeue_request = true;
+      expect(event.dequeue_asserted,
+             "dequeue request should assert the SPU FIFO dequeue signal");
+      expect(fifo_push_by_write_cycle[event.cycle],
+             "SPU FIFO dequeue request should wait one cycle after push");
+      dequeue_request_by_cycle[event.cycle] = true;
+    }
+    if (event.event == "spu_output_fifo_dequeue") {
+      saw_fifo_dequeue = true;
+      expect(event.dequeue_asserted,
+             "dequeue event should carry asserted dequeue signal");
+      expect(dequeue_request_by_cycle[event.cycle],
+             "SPU FIFO dequeue should follow a dequeue request");
+    }
+    if (event.event == "spu_output_fifo_empty") {
+      saw_fifo_empty = true;
+    }
+    if (event.event == "vpu_pass_through") {
+      saw_vpu = true;
+    }
+    if (event.event == "requant_shift" && event.placement == "after_vpu") {
+      saw_after_vpu_requant = true;
+    }
+    if (event.event == "pre_requant_output") {
+      saw_pre_requant = true;
+    }
+  }
+
+  expect(saw_spu_fifo, "SPU output should pass through the output FIFO");
+  for (const auto& [cycle, count] : fifo_pushes_by_cycle) {
+    expect(count <= 1, "SPU FIFO should enqueue at most one entry per cycle");
+  }
+  expect(saw_invalid_fifo_lane,
+         "SPU FIFO should include zero/void lanes for partial entries");
+  expect(saw_fifo_dequeue_request,
+         "SPU FIFO should trace explicit dequeue requests");
+  expect(saw_fifo_dequeue, "SPU FIFO should trace explicit dequeues");
+  expect(!saw_fifo_empty,
+         "SPU FIFO should not dequeue when no entry is available");
+  expect(saw_vpu, "post-SPU output should pass through the VPU");
+  expect(saw_after_vpu_requant,
+         "requantization should be traceable after the VPU");
+  expect(!saw_pre_requant,
+         "systolic trace should not mark pre-requant output before VPU");
+}
+
+void test_systolic_array_can_seed_bias_inside_pe(
+    npu_sim::SystolicArray& array) {
+  const npu_sim::SystolicArrayResult result = array.run_matrix_multiply(
+      small_activation_matrix(), small_weight_matrix(), true);
+
+  expect(result.outputs[0][0].integer_value == 6,
+         "inside-PE biased C00 should match post-array bias/requantization");
+  expect(result.outputs[0][1].integer_value == -2,
+         "inside-PE biased C01 should include per-column bias");
+  expect(result.outputs[1][0].integer_value == 7,
+         "inside-PE biased C10 should still saturate");
+  expect(result.outputs[1][1].integer_value == 1,
+         "inside-PE biased C11 should match post-array pipeline semantics");
+
+  bool saw_bias_fifo_push = false;
+  bool saw_bias_fifo_pop = false;
+  bool saw_bias_register_load = false;
+  bool saw_bias_accumulator_seed = false;
+  bool saw_bias_add = false;
+  bool saw_pre_requant_biased_value = false;
+  npu_sim::Cycle base_cycle = 0;
+  npu_sim::Cycle col0_push_cycle = 0;
+  npu_sim::Cycle col1_push_cycle = 0;
+  npu_sim::Cycle pe11_seed_cycle = 0;
+  std::uint64_t bias_fifo_push_count = 0;
+  for (const npu_sim::SystolicTraceEvent& event : result.trace) {
+    if (event.event == "mac_start" && event.row == 0 && event.col == 0 &&
+        event.k == 0) {
+      base_cycle = event.cycle;
+    }
+    if (event.event == "bias_fifo_push" && event.placement == "inside_pe") {
+      saw_bias_fifo_push = true;
+      ++bias_fifo_push_count;
+      if (event.row == -1 && event.col == 0) {
+        col0_push_cycle = event.cycle;
+      }
+      if (event.row == -1 && event.col == 1) {
+        col1_push_cycle = event.cycle;
+      }
+    }
+    if (event.event == "bias_fifo_pop" && event.placement == "inside_pe") {
+      saw_bias_fifo_pop = true;
+    }
+    if (event.event == "bias_register_load" &&
+        event.placement == "inside_pe") {
+      saw_bias_register_load = true;
+    }
+    if (event.event == "bias_accumulator_seed" &&
+        event.placement == "inside_pe" && event.col == 1 &&
+        event.bias == -1.0 && event.bias_format_bits == 16) {
+      saw_bias_accumulator_seed = true;
+      if (event.row == 1) {
+        pe11_seed_cycle = event.cycle;
+      }
+    }
+    if (event.event == "bias_add") {
+      saw_bias_add = true;
+    }
+    if (event.event == "pre_requant_output" && event.row == 1 &&
+        event.col == 1 && event.value == 1.0) {
+      saw_pre_requant_biased_value = true;
+    }
+  }
+
+  expect(saw_bias_fifo_push,
+         "inside-PE bias should trace bias FIFO ingress");
+  expect(saw_bias_fifo_pop,
+         "inside-PE bias should trace bias FIFO consumption");
+  expect(bias_fifo_push_count == 2,
+         "inside-PE bias should push one top-edge bias per column");
+  expect(col0_push_cycle == base_cycle,
+         "column 0 bias should enter from the top at the base cycle");
+  expect(col1_push_cycle == base_cycle + 1,
+         "column 1 bias should enter from the top one cycle later");
+  expect(pe11_seed_cycle == base_cycle + 2,
+         "PE(1,1) should seed when the streamed bias reaches it");
+  expect(saw_bias_register_load,
+         "inside-PE bias should trace PE-local register load");
+  expect(saw_bias_accumulator_seed,
+         "inside-PE bias should trace accumulator seeding metadata");
+  expect(!saw_bias_add,
+         "inside-PE bias should not use the post-array bias adder");
+  expect(saw_pre_requant_biased_value,
+         "requantization should see already-biased PE accumulator values");
+}
+
+void test_weight_stationary_array_can_seed_bias_inside_pe(
+    npu_sim::SystolicArray& array) {
+  const npu_sim::PEInputMatrixBatch activation_batches{
+      small_activation_matrix(),
+      {
+          {pe_input(2), pe_input(0)},
+          {pe_input(1), pe_input(-1)},
+      },
+  };
+  const npu_sim::PEInputMatrixBatch weight_batches{small_weight_matrix()};
+  const npu_sim::SystolicArrayResult result =
+      array.run_matrix_multiply_stream(activation_batches, weight_batches, true);
+
+  expect(result.output_batches[0][0][0].integer_value == 4,
+         "inside-PE WS bias should preserve C00");
+  expect(result.output_batches[0][0][1].integer_value == -2,
+         "inside-PE WS bias should adjust C01");
+  expect(result.output_batches[1][0][0].integer_value == 4,
+         "inside-PE WS bias should seed reused-weight batch C00");
+  expect(result.output_batches[1][0][1].integer_value == 1,
+         "inside-PE WS bias should seed reused-weight batch C01");
+
+  bool saw_reuse = false;
+  bool saw_batch_one_bias_seed = false;
+  bool saw_bias_add = false;
+  npu_sim::Cycle batch_one_base_cycle = 0;
+  npu_sim::Cycle batch_one_col1_push_cycle = 0;
+  npu_sim::Cycle batch_one_pe11_seed_cycle = 0;
+  for (const npu_sim::SystolicTraceEvent& event : result.trace) {
+    if (event.event == "stationary_weight_reuse" && event.batch == 1) {
+      saw_reuse = true;
+    }
+    if (event.event == "mac_start" && event.batch == 1 && event.row == 0 &&
+        event.col == 0 && event.k == 0) {
+      batch_one_base_cycle = event.cycle;
+    }
+    if (event.event == "bias_fifo_push" && event.batch == 1 &&
+        event.row == -1 && event.col == 1) {
+      batch_one_col1_push_cycle = event.cycle;
+    }
+    if (event.event == "bias_accumulator_seed" && event.batch == 1 &&
+        event.placement == "inside_pe") {
+      saw_batch_one_bias_seed = true;
+      if (event.row == 1 && event.col == 1) {
+        batch_one_pe11_seed_cycle = event.cycle;
+      }
+    }
+    if (event.event == "bias_add") {
+      saw_bias_add = true;
+    }
+  }
+
+  expect(saw_reuse, "weight-stationary test should reuse resident weights");
+  expect(saw_batch_one_bias_seed,
+         "inside-PE bias should seed each activation batch");
+  expect(batch_one_col1_push_cycle == batch_one_base_cycle + 1,
+         "weight-stationary bias should stream one column per cycle");
+  expect(batch_one_pe11_seed_cycle == batch_one_base_cycle + 2,
+         "weight-stationary bias should propagate down from the top");
+  expect(!saw_bias_add,
+         "inside-PE weight-stationary bias should skip post-array bias add");
 }
 
 }  // namespace
@@ -629,6 +959,17 @@ int main() {
   npu_sim::SystolicArray requantized_array(
       "test_requantized_array",
       requantized_systolic_array_config("requantized_array"));
+  npu_sim::SystolicArray after_vpu_requantized_array(
+      "test_after_vpu_requantized_array",
+      after_vpu_requantized_systolic_array_config(
+          "after_vpu_requantized_array"));
+  npu_sim::SystolicArray inside_pe_bias_array(
+      "test_inside_pe_bias_array",
+      inside_pe_bias_systolic_array_config("inside_pe_bias_array"));
+  npu_sim::SystolicArray inside_pe_bias_ws_array(
+      "test_inside_pe_bias_ws_array",
+      inside_pe_bias_weight_stationary_config("inside_pe_bias_ws_array"));
+  npu_sim::VectorProcessingUnit vpu("test_vpu", vpu_config("vpu0"));
   npu_sim::SimulatorConfig simulator_config;
   simulator_config.core_count = 4;
   simulator_config.scratchpads.push_back(
@@ -654,7 +995,14 @@ int main() {
   test_pe_accepts_dataflow_modes(output_stationary_pe, weight_stationary_pe);
   test_systolic_array_output_stationary_trace(output_stationary_array);
   test_systolic_array_weight_stationary_trace(weight_stationary_array);
+  test_systolic_array_weight_stationary_reuses_resident_weights(
+      weight_stationary_array);
   test_systolic_array_requantizes_outputs(requantized_array);
+  test_systolic_array_can_requantize_after_vpu(after_vpu_requantized_array,
+                                               vpu);
+  test_systolic_array_can_seed_bias_inside_pe(inside_pe_bias_array);
+  test_weight_stationary_array_can_seed_bias_inside_pe(
+      inside_pe_bias_ws_array);
   test_systemc_backend_advances_cycles();
   return 0;
 }

@@ -63,6 +63,8 @@ class PipelinePlacement(str, Enum):
     """Attachment points for post-processing pipeline modules."""
 
     AFTER_SYSTOLIC_ARRAY = "after_systolic_array"
+    AFTER_VPU = "after_vpu"
+    INSIDE_PE = "inside_pe"
 
 
 @dataclass(frozen=True)
@@ -184,8 +186,13 @@ class BiasConfig:
     def __post_init__(self) -> None:
         if isinstance(self.placement, PipelinePlacement):
             object.__setattr__(self, "placement", self.placement.value)
-        if not isinstance(self.placement, str) or not self.placement:
-            raise ValueError("bias placement must be a non-empty string")
+        if self.placement not in {
+            PipelinePlacement.AFTER_SYSTOLIC_ARRAY.value,
+            PipelinePlacement.INSIDE_PE.value,
+        }:
+            raise ValueError(
+                "bias placement must be after_systolic_array or inside_pe"
+            )
         _validate_pipeline_register(self.bias, "bias")
         if self.format.kind is not NumericFormatKind.FLOAT:
             _validate_pipeline_register(self.bias, "bias", integer_only=True)
@@ -260,6 +267,64 @@ class RequantizationConfig:
 
 
 @dataclass(frozen=True)
+class SPUOutputFIFOConfig:
+    """FIFO between the SPU bias adder and downstream vector processing."""
+
+    depth: int = 16
+    latency_cycles: int = 0
+
+    def __post_init__(self) -> None:
+        if self.depth <= 0:
+            raise ValueError("SPU output FIFO depth must be positive")
+        if self.latency_cycles < 0:
+            raise ValueError("SPU output FIFO latency_cycles must be non-negative")
+
+    def to_native_dict(self) -> dict[str, object]:
+        return {
+            "depth": self.depth,
+            "latency_cycles": self.latency_cycles,
+        }
+
+
+@dataclass(frozen=True)
+class VectorProcessingUnitConfig:
+    """Configuration for a pass-through SIMD vector processing unit."""
+
+    name: str
+    enabled: bool = False
+    lanes: int = 1
+    latency_cycles: int = 1
+    instruction_memory: SRAMScratchpadConfig = field(
+        default_factory=lambda: SRAMScratchpadConfig(
+            name="vpu_instruction_sram",
+            num_rw_ports=1,
+            word_size=32,
+            write_size=32,
+            num_words=64,
+            read_latency_cycles=1,
+            write_latency_cycles=1,
+        )
+    )
+
+    def __post_init__(self) -> None:
+        if not self.name:
+            raise ValueError("VPU name must be non-empty")
+        if self.lanes <= 0:
+            raise ValueError("VPU lanes must be positive")
+        if self.latency_cycles < 0:
+            raise ValueError("VPU latency_cycles must be non-negative")
+
+    def to_native_dict(self) -> dict[str, object]:
+        return {
+            "name": self.name,
+            "enabled": self.enabled,
+            "lanes": self.lanes,
+            "latency_cycles": self.latency_cycles,
+            "instruction_memory": self.instruction_memory.to_native_dict(),
+        }
+
+
+@dataclass(frozen=True)
 class ProcessingElementConfig:
     """Configuration for a SystemC processing element module."""
 
@@ -311,6 +376,8 @@ class SystolicArrayConfig:
         )
     )
     bias: BiasConfig = field(default_factory=BiasConfig)
+    spu_output_fifo: SPUOutputFIFOConfig = field(default_factory=SPUOutputFIFOConfig)
+    output_vpu: str | None = None
     requantization: RequantizationConfig = field(default_factory=RequantizationConfig)
 
     def __post_init__(self) -> None:
@@ -324,6 +391,11 @@ class SystolicArrayConfig:
             object.__setattr__(
                 self, "dataflow_mode", PEDataflowMode(self.dataflow_mode)
             )
+        if self.output_vpu is not None and not self.output_vpu:
+            raise ValueError("systolic array output_vpu must be non-empty")
+        if self.requantization.placement == PipelinePlacement.AFTER_VPU.value:
+            if self.output_vpu is None:
+                raise ValueError("requantization after_vpu requires output_vpu")
         if self.requantization.bias is not None and not self.bias.enabled:
             object.__setattr__(
                 self,
@@ -350,6 +422,8 @@ class SystolicArrayConfig:
             "weight": self.weight.to_native_dict(),
             "accumulator": self.accumulator.to_native_dict(),
             "bias": self.bias.to_native_dict(),
+            "spu_output_fifo": self.spu_output_fifo.to_native_dict(),
+            "output_vpu": self.output_vpu,
             "requantization": self.requantization.to_native_dict(),
         }
 
@@ -426,6 +500,9 @@ class NPUConfig:
     latencies: LatencyConfig = field(default_factory=LatencyConfig)
     scratchpads: Sequence[SRAMScratchpadConfig] = field(default_factory=tuple)
     processing_elements: Sequence[ProcessingElementConfig] = field(default_factory=tuple)
+    vector_processing_units: Sequence[VectorProcessingUnitConfig] = field(
+        default_factory=tuple
+    )
     systolic_arrays: Sequence[SystolicArrayConfig] = field(default_factory=tuple)
 
     def to_native_dict(self) -> dict[str, object]:
@@ -450,6 +527,9 @@ class NPUConfig:
             ],
             "processing_elements": [
                 pe.to_native_dict() for pe in self.processing_elements
+            ],
+            "vector_processing_units": [
+                vpu.to_native_dict() for vpu in self.vector_processing_units
             ],
             "systolic_arrays": [
                 array.to_native_dict() for array in self.systolic_arrays

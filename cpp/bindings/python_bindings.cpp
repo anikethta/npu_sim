@@ -87,6 +87,49 @@ npu_sim::RequantizationConfig parse_requantization(
   return native_requantization;
 }
 
+npu_sim::SystolicArrayConfig::SPUOutputFIFOConfig parse_spu_output_fifo(
+    const py::dict& fifo) {
+  npu_sim::SystolicArrayConfig::SPUOutputFIFOConfig native_fifo;
+  native_fifo.depth = fifo["depth"].cast<std::uint64_t>();
+  native_fifo.latency_cycles =
+      fifo["latency_cycles"].cast<npu_sim::Cycle>();
+  return native_fifo;
+}
+
+npu_sim::SRAMScratchpadConfig parse_scratchpad_config(
+    const py::dict& scratchpad) {
+  npu_sim::SRAMScratchpadConfig scratchpad_config;
+  scratchpad_config.name = scratchpad["name"].cast<std::string>();
+  scratchpad_config.num_rw_ports =
+      scratchpad["num_rw_ports"].cast<std::uint64_t>();
+  scratchpad_config.num_r_ports =
+      scratchpad["num_r_ports"].cast<std::uint64_t>();
+  scratchpad_config.num_w_ports =
+      scratchpad["num_w_ports"].cast<std::uint64_t>();
+  scratchpad_config.word_size =
+      scratchpad["word_size"].cast<std::uint64_t>();
+  scratchpad_config.write_size =
+      scratchpad["write_size"].cast<std::uint64_t>();
+  scratchpad_config.num_words =
+      scratchpad["num_words"].cast<std::uint64_t>();
+  scratchpad_config.read_latency_cycles =
+      scratchpad["read_latency_cycles"].cast<npu_sim::Cycle>();
+  scratchpad_config.write_latency_cycles =
+      scratchpad["write_latency_cycles"].cast<npu_sim::Cycle>();
+  return scratchpad_config;
+}
+
+npu_sim::VectorProcessingUnitConfig parse_vpu(const py::dict& vpu) {
+  npu_sim::VectorProcessingUnitConfig native_vpu;
+  native_vpu.name = vpu["name"].cast<std::string>();
+  native_vpu.enabled = vpu["enabled"].cast<bool>();
+  native_vpu.lanes = vpu["lanes"].cast<std::uint64_t>();
+  native_vpu.latency_cycles = vpu["latency_cycles"].cast<npu_sim::Cycle>();
+  native_vpu.instruction_memory =
+      parse_scratchpad_config(vpu["instruction_memory"].cast<py::dict>());
+  return native_vpu;
+}
+
 npu_sim::SystolicArrayConfig parse_systolic_array(const py::dict& array) {
   npu_sim::SystolicArrayConfig array_config;
   array_config.name = array["name"].cast<std::string>();
@@ -101,6 +144,18 @@ npu_sim::SystolicArrayConfig parse_systolic_array(const py::dict& array) {
   array_config.accumulator =
       parse_numeric_format(array["accumulator"].cast<py::dict>());
   array_config.bias = parse_bias(array["bias"].cast<py::dict>());
+  if (array.contains("spu_output_fifo")) {
+    array_config.spu_output_fifo =
+        parse_spu_output_fifo(array["spu_output_fifo"].cast<py::dict>());
+  }
+  if (array.contains("vpu")) {
+    throw std::invalid_argument(
+        "SystolicArrayConfig no longer accepts nested vpu; use "
+        "NPUConfig.vector_processing_units and output_vpu");
+  }
+  if (!array["output_vpu"].is_none()) {
+    array_config.output_vpu = array["output_vpu"].cast<std::string>();
+  }
   array_config.requantization =
       parse_requantization(array["requantization"].cast<py::dict>());
   return array_config;
@@ -122,26 +177,8 @@ npu_sim::SimulatorConfig parse_config(const py::dict& config) {
 
   if (config.contains("scratchpads")) {
     for (const py::handle item : config["scratchpads"]) {
-      const py::dict scratchpad = item.cast<py::dict>();
-      npu_sim::SRAMScratchpadConfig scratchpad_config;
-      scratchpad_config.name = scratchpad["name"].cast<std::string>();
-      scratchpad_config.num_rw_ports =
-          scratchpad["num_rw_ports"].cast<std::uint64_t>();
-      scratchpad_config.num_r_ports =
-          scratchpad["num_r_ports"].cast<std::uint64_t>();
-      scratchpad_config.num_w_ports =
-          scratchpad["num_w_ports"].cast<std::uint64_t>();
-      scratchpad_config.word_size =
-          scratchpad["word_size"].cast<std::uint64_t>();
-      scratchpad_config.write_size =
-          scratchpad["write_size"].cast<std::uint64_t>();
-      scratchpad_config.num_words =
-          scratchpad["num_words"].cast<std::uint64_t>();
-      scratchpad_config.read_latency_cycles =
-          scratchpad["read_latency_cycles"].cast<npu_sim::Cycle>();
-      scratchpad_config.write_latency_cycles =
-          scratchpad["write_latency_cycles"].cast<npu_sim::Cycle>();
-      native_config.scratchpads.push_back(std::move(scratchpad_config));
+      native_config.scratchpads.push_back(
+          parse_scratchpad_config(item.cast<py::dict>()));
     }
   }
 
@@ -159,6 +196,13 @@ npu_sim::SimulatorConfig parse_config(const py::dict& config) {
       pe_config.accumulator =
           parse_numeric_format(pe["accumulator"].cast<py::dict>());
       native_config.processing_elements.push_back(std::move(pe_config));
+    }
+  }
+
+  if (config.contains("vector_processing_units")) {
+    for (const py::handle item : config["vector_processing_units"]) {
+      native_config.vector_processing_units.push_back(
+          parse_vpu(item.cast<py::dict>()));
     }
   }
 
@@ -299,6 +343,25 @@ py::dict trace_event_to_dict(const npu_sim::SystolicTraceEvent& event) {
     out["bias"] = std::move(metadata);
   } else {
     out["bias"] = py::none();
+  }
+  if (event.has_spu_fifo_metadata) {
+    py::list lanes;
+    for (const npu_sim::SPUOutputFIFOLane& lane : event.lanes) {
+      py::dict lane_out;
+      lane_out["valid"] = lane.valid;
+      lane_out["row"] = lane.row < 0 ? py::none() : py::cast(lane.row);
+      lane_out["col"] = lane.col < 0 ? py::none() : py::cast(lane.col);
+      lane_out["value"] =
+          lane.value_is_float
+              ? py::cast(lane.value)
+              : py::cast(static_cast<std::int64_t>(std::llround(lane.value)));
+      lanes.append(std::move(lane_out));
+    }
+    out["lanes"] = std::move(lanes);
+    out["dequeue_asserted"] = event.dequeue_asserted;
+  } else {
+    out["lanes"] = py::none();
+    out["dequeue_asserted"] = py::none();
   }
   return out;
 }

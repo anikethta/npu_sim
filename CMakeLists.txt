@@ -31,6 +31,7 @@ add_library(npu_sim_core
   cpp/src/modules/processing_element.cpp
   cpp/src/modules/sram_scratchpad.cpp
   cpp/src/modules/systolic_array.cpp
+  cpp/src/modules/vector_processing_unit.cpp
   cpp/src/simulator.cpp
 )
 
@@ -49,6 +50,13 @@ pybind11_add_module(_native
 target_link_libraries(_native PRIVATE npu_sim_core)
 
 install(TARGETS _native DESTINATION npu_sim)
+install(
+  FILES
+    npu_sim/templates/__init__.py
+    npu_sim/templates/systolic_array.html
+    npu_sim/templates/vpu.html
+  DESTINATION npu_sim/templates
+)
 
 enable_testing()
 

@@ -8,6 +8,7 @@
 #include "npu_sim/modules/processing_element.hpp"
 #include "npu_sim/modules/sram_scratchpad.hpp"
 #include "npu_sim/modules/systolic_array.hpp"
+#include "npu_sim/modules/vector_processing_unit.hpp"
 #include "npu_sim/types.hpp"
 
 namespace npu_sim {
@@ -18,6 +19,7 @@ struct SimulatorConfig {
   std::uint64_t core_count{1};
   std::vector<SRAMScratchpadConfig> scratchpads;
   std::vector<ProcessingElementConfig> processing_elements;
+  std::vector<VectorProcessingUnitConfig> vector_processing_units;
   std::vector<SystolicArrayConfig> systolic_arrays;
 };
 

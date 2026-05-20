@@ -46,8 +46,7 @@ PEValue make_pe_value(const NumericFormatConfig& format,
   }
 
   if (input.is_float) {
-    throw std::invalid_argument(std::string("integer PE ") + operand_name +
-                                " input must be a Python int");
+    throw std::invalid_argument(std::string("integer PE ") + operand_name + " input must be a Python int");
   }
   return PEValue::integer(format, input.integer_value);
 }
@@ -89,8 +88,7 @@ SystemCBackend::SystemCBackend(SystemCBackendConfig config)
   processing_elements_.reserve(config_.processing_elements.size());
   for (std::size_t index = 0; index < config_.processing_elements.size();
        ++index) {
-    const ProcessingElementConfig& pe_config =
-        config_.processing_elements[index];
+    const ProcessingElementConfig& pe_config = config_.processing_elements[index];
     const std::string module_name =
         "backend_" + std::to_string(instance_id_) + "_pe_" +
         std::to_string(index) + "_" + sanitize_module_name(pe_config.name);
@@ -103,6 +101,24 @@ SystemCBackend::SystemCBackend(SystemCBackendConfig config)
     processing_elements_.push_back(std::move(pe));
   }
 
+  vector_processing_units_.reserve(config_.vector_processing_units.size());
+  for (std::size_t index = 0; index < config_.vector_processing_units.size();
+       ++index) {
+    const VectorProcessingUnitConfig& vpu_config =
+        config_.vector_processing_units[index];
+    const std::string module_name =
+        "backend_" + std::to_string(instance_id_) + "_vpu_" +
+        std::to_string(index) + "_" + sanitize_module_name(vpu_config.name);
+    auto vpu =
+        std::make_unique<VectorProcessingUnit>(module_name.c_str(), vpu_config);
+    VectorProcessingUnit* vpu_ptr = vpu.get();
+    if (!vector_processing_units_by_name_.emplace(vpu_config.name, vpu_ptr)
+             .second) {
+      throw std::invalid_argument("duplicate VPU name: " + vpu_config.name);
+    }
+    vector_processing_units_.push_back(std::move(vpu));
+  }
+
   systolic_arrays_.reserve(config_.systolic_arrays.size());
   for (std::size_t index = 0; index < config_.systolic_arrays.size();
        ++index) {
@@ -110,13 +126,21 @@ SystemCBackend::SystemCBackend(SystemCBackendConfig config)
     const std::string module_name =
         "backend_" + std::to_string(instance_id_) + "_array_" +
         std::to_string(index) + "_" + sanitize_module_name(array_config.name);
-    auto array =
-        std::make_unique<SystolicArray>(module_name.c_str(), array_config);
+    auto array = std::make_unique<SystolicArray>(module_name.c_str(), array_config);
     SystolicArray* array_ptr = array.get();
     if (!systolic_arrays_by_name_.emplace(array_config.name, array_ptr)
              .second) {
       throw std::invalid_argument("duplicate systolic array name: " +
                                   array_config.name);
+    }
+    if (!array_config.output_vpu.empty()) {
+      const auto vpu_found =
+          vector_processing_units_by_name_.find(array_config.output_vpu);
+      if (vpu_found == vector_processing_units_by_name_.end()) {
+        throw std::out_of_range("unknown output VPU: " +
+                                array_config.output_vpu);
+      }
+      array_ptr->attach_output_vpu(vpu_found->second);
     }
     systolic_arrays_.push_back(std::move(array));
   }
@@ -140,10 +164,8 @@ PEMacResult SystemCBackend::mac(const std::string& pe_name,
 
   ProcessingElement& pe = *found->second;
   const ProcessingElementConfig& pe_config = pe.config();
-  const PEValue activation_value =
-      make_pe_value(pe_config.activation.format, activation, "activation");
-  const PEValue weight_value =
-      make_pe_value(pe_config.weight.format, weight, "weight");
+  const PEValue activation_value = make_pe_value(pe_config.activation.format, activation, "activation");
+  const PEValue weight_value = make_pe_value(pe_config.weight.format, weight, "weight");
   const PEValue result = pe.mac(activation_value, weight_value);
 
   current_cycle_ = pe.last_completion_cycle();
@@ -182,8 +204,12 @@ std::uint64_t SystemCBackend::component_count() const {
   for (const auto& array : systolic_arrays_) {
     array_component_count += array->component_count();
   }
-  return config_.core_count + scratchpads_.size() +
-         processing_elements_.size() + array_component_count;
+  std::uint64_t vpu_component_count = 0;
+  for (const auto& vpu : vector_processing_units_) {
+    vpu_component_count += vpu->component_count();
+  }
+  return config_.core_count + scratchpads_.size() + processing_elements_.size() +
+         vpu_component_count + array_component_count;
 }
 
 std::uint64_t SystemCBackend::event_count() const { return event_count_; }

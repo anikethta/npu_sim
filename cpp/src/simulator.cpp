@@ -13,6 +13,7 @@ SystemCBackendConfig to_backend_config(const SimulatorConfig& config) {
   backend_config.core_count = config.core_count;
   backend_config.scratchpads = config.scratchpads;
   backend_config.processing_elements = config.processing_elements;
+  backend_config.vector_processing_units = config.vector_processing_units;
   backend_config.systolic_arrays = config.systolic_arrays;
   return backend_config;
 }

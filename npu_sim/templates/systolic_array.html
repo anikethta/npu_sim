@@ -1,0 +1,651 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__</title>
+<style>
+:root {
+  color-scheme: light;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #f7f8fb;
+  color: #17202a;
+}
+body {
+  margin: 0;
+  padding: 24px;
+}
+main {
+  max-width: 1120px;
+  margin: 0 auto;
+}
+h1 {
+  font-size: 24px;
+  margin: 0 0 16px;
+}
+.toolbar, .summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+button {
+  border: 1px solid #b8c2d2;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #17202a;
+  min-width: 40px;
+  min-height: 34px;
+  cursor: pointer;
+}
+button:hover {
+  background: #edf2f7;
+}
+input[type="range"] {
+  width: 280px;
+}
+.layout {
+  display: grid;
+  grid-template-columns: minmax(300px, 1fr) 320px;
+  gap: 18px;
+}
+.grid {
+  display: grid;
+  gap: 8px;
+  align-items: stretch;
+}
+.requant-pipeline {
+  margin-top: 12px;
+  border-top: 1px solid #cbd5e1;
+  padding-top: 12px;
+}
+.pipeline-title {
+  font-size: 13px;
+  font-weight: 700;
+  margin-bottom: 8px;
+}
+.pipeline-stages {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(96px, 1fr));
+  gap: 8px;
+}
+.pipeline-stage {
+  min-height: 82px;
+  border: 1px solid #b8c2d2;
+  border-radius: 8px;
+  background: #fbfdff;
+  padding: 8px;
+}
+.pipeline-stage.active {
+  border-color: #7c3aed;
+  box-shadow: 0 0 0 2px rgba(124, 58, 237, 0.18);
+}
+.pipeline-stage.final.active {
+  border-color: #d97706;
+  box-shadow: 0 0 0 2px rgba(217, 119, 6, 0.22);
+}
+.pipeline-stage.fifo-stage {
+  grid-column: 1 / -1;
+}
+.stage-name {
+  font-size: 12px;
+  font-weight: 700;
+  margin-bottom: 6px;
+}
+.stage-items {
+  display: grid;
+  gap: 4px;
+}
+.stage-item {
+  border: 1px solid #ddd6fe;
+  border-radius: 6px;
+  background: #f5f3ff;
+  color: #312e81;
+  padding: 4px 5px;
+  font-size: 11px;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+.stage-item.final {
+  border-color: #f59e0b;
+  background: #fffbeb;
+  color: #78350f;
+}
+.fifo-entry {
+  border: 1px solid #bae6fd;
+  border-radius: 7px;
+  background: #f0f9ff;
+  color: #0c4a6e;
+  padding: 6px;
+  display: grid;
+  gap: 6px;
+}
+.fifo-entry.dequeue {
+  border-color: #67e8f9;
+  background: #ecfeff;
+}
+.fifo-occupancy {
+  border: 1px solid #cbd5e1;
+  border-radius: 7px;
+  background: #f8fafc;
+  padding: 6px;
+  display: grid;
+  gap: 6px;
+}
+.fifo-occupancy-title {
+  color: #334155;
+  font-size: 11px;
+  font-weight: 800;
+}
+.fifo-control {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 700;
+}
+.fifo-signal {
+  border: 1px solid #0891b2;
+  border-radius: 999px;
+  padding: 1px 6px;
+  background: #ffffff;
+  color: #155e75;
+  font-weight: 700;
+}
+.fifo-lanes {
+  display: grid;
+  grid-template-columns: repeat(var(--fifo-lanes), minmax(58px, 1fr));
+  gap: 5px;
+}
+.fifo-lane {
+  border: 1px solid #38bdf8;
+  border-radius: 6px;
+  background: #ffffff;
+  padding: 4px;
+  min-height: 44px;
+  display: grid;
+  align-content: start;
+  gap: 2px;
+  font-size: 11px;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+.fifo-lane.void {
+  border-style: dashed;
+  border-color: #cbd5e1;
+  background: #f8fafc;
+  color: #64748b;
+}
+.fifo-bank {
+  font-weight: 800;
+  color: #075985;
+}
+.fifo-lane.void .fifo-bank {
+  color: #64748b;
+}
+.stage-empty {
+  color: #64748b;
+  font-size: 12px;
+}
+.pe {
+  min-height: 112px;
+  border: 1px solid #b8c2d2;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 8px;
+  display: grid;
+  grid-template-rows: auto 1fr;
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.06);
+}
+.pe.active {
+  outline: 3px solid #2563eb;
+}
+.pe.commit {
+  outline: 3px solid #16a34a;
+}
+.pe.output {
+  outline: 3px solid #d97706;
+}
+.pe.requant {
+  outline: 3px solid #7c3aed;
+}
+.pe.quant-output {
+  outline: 3px solid #f59e0b;
+}
+.pe.shadow {
+  outline: 3px solid #9333ea;
+}
+.pe.fifo {
+  outline: 3px solid #0891b2;
+}
+.pe.bias {
+  outline: 3px solid #db2777;
+}
+.coord {
+  font-weight: 700;
+  font-size: 13px;
+}
+.events {
+  font-size: 12px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.panel {
+  border: 1px solid #b8c2d2;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 12px;
+}
+.panel h2 {
+  margin: 0 0 8px;
+  font-size: 15px;
+}
+.matrix {
+  display: grid;
+  gap: 6px;
+  width: max-content;
+}
+.cell {
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  min-width: 44px;
+  min-height: 32px;
+  display: grid;
+  place-items: center;
+  background: #f8fafc;
+  font-variant-numeric: tabular-nums;
+}
+.stream {
+  font-size: 13px;
+  margin-bottom: 8px;
+}
+@media (max-width: 760px) {
+  body { padding: 12px; }
+  .layout { grid-template-columns: 1fr; }
+  .pipeline-stages { grid-template-columns: 1fr; }
+  input[type="range"] { width: 100%; }
+}
+</style>
+</head>
+<body>
+<main>
+  <h1>__TITLE__</h1>
+  <div class="summary" id="summary"></div>
+  <div class="toolbar">
+    <button id="prev" title="Previous cycle">Prev</button>
+    <button id="play" title="Play or pause">Play</button>
+    <button id="next" title="Next cycle">Next</button>
+    <label>Cycle <input id="cycle" type="range" min="0" value="0"></label>
+    <span id="cycleLabel"></span>
+    <label>Speed <input id="speed" type="range" min="100" max="2000" value="1000"></label>
+  </div>
+  <div class="layout">
+    <section class="panel">
+      <div class="stream" id="streams"></div>
+      <div class="grid" id="grid"></div>
+      <div class="requant-pipeline">
+        <div class="pipeline-title">SPU Output Pipeline</div>
+        <div class="pipeline-stages" id="requantPipeline"></div>
+      </div>
+    </section>
+    <aside class="panel">
+      <h2>Final Results</h2>
+      <div id="outputs"></div>
+      <h2 style="margin-top:16px;">Cycle Events</h2>
+      <div id="eventList"></div>
+    </aside>
+  </div>
+</main>
+<script id="trace-data" type="application/json">__TRACE_JSON__</script>
+<script>
+const result = JSON.parse(document.getElementById("trace-data").textContent);
+const size = result.size;
+const trace = result.trace || [];
+const maxCycle = Math.max(result.current_cycle || 0, ...trace.map(e => e.cycle || 0));
+let cycle = 0;
+let timer = null;
+
+const grid = document.getElementById("grid");
+grid.style.gridTemplateColumns = `repeat(${size}, minmax(92px, 1fr))`;
+for (let r = 0; r < size; r++) {
+  for (let c = 0; c < size; c++) {
+    const pe = document.createElement("div");
+    pe.className = "pe";
+    pe.id = `pe-${r}-${c}`;
+    pe.innerHTML = `<div class="coord">PE(${r}, ${c})</div><div class="events"></div>`;
+    grid.appendChild(pe);
+  }
+}
+
+const cycleInput = document.getElementById("cycle");
+cycleInput.max = String(maxCycle);
+const cycleLabel = document.getElementById("cycleLabel");
+const eventList = document.getElementById("eventList");
+const streams = document.getElementById("streams");
+const requantPipeline = document.getElementById("requantPipeline");
+const requantStages = __PIPELINE_STAGES_JSON__;
+
+for (const [eventName, label] of requantStages) {
+  const stage = document.createElement("div");
+  if (eventName === "requant_saturate") {
+    stage.className = "pipeline-stage final";
+  } else if (eventName === "spu_output_fifo_push") {
+    stage.className = "pipeline-stage fifo-stage";
+  } else {
+    stage.className = "pipeline-stage";
+  }
+  stage.id = `stage-${eventName}`;
+  stage.innerHTML = `<div class="stage-name">${label}</div><div class="stage-items"></div>`;
+  requantPipeline.appendChild(stage);
+}
+
+document.getElementById("summary").textContent =
+  `array size ${size}x${size} | mode ${result.dataflow_mode} | batches ${result.batch_count || 1} | operations ${result.operation_count} | final cycle ${result.current_cycle}`;
+
+function renderSingleMatrix(values, label) {
+  const section = document.createElement("div");
+  const heading = document.createElement("h3");
+  heading.textContent = label;
+  heading.style.fontSize = "13px";
+  heading.style.margin = "10px 0 6px";
+  section.appendChild(heading);
+  const matrix = document.createElement("div");
+  matrix.className = "matrix";
+  matrix.style.gridTemplateColumns = `repeat(${size}, 44px)`;
+  values.forEach(row => row.forEach(value => {
+    const cell = document.createElement("div");
+    cell.className = "cell";
+    cell.textContent = value;
+    matrix.appendChild(cell);
+  }));
+  section.appendChild(matrix);
+  return section;
+}
+
+function renderMatrix(values, batches) {
+  const host = document.getElementById("outputs");
+  host.innerHTML = "";
+  if (batches && batches.length > 1) {
+    batches.forEach((matrix, index) => {
+      host.appendChild(renderSingleMatrix(matrix, `Batch ${index}`));
+    });
+    return;
+  }
+  host.appendChild(renderSingleMatrix(values, "Outputs"));
+}
+
+function formatEvent(e) {
+  let where = "";
+  if (e.row !== null && e.col !== null) {
+    where = ` PE(${e.row},${e.col})`;
+  } else if (e.row !== null) {
+    where = ` row=${e.row}`;
+  } else if (e.col !== null) {
+    where = ` col=${e.col}`;
+  }
+  const kval = e.k === null ? "" : ` k=${e.k}`;
+  const batch = e.batch === null || e.batch === undefined ? "" : ` batch=${e.batch}`;
+  const value = e.value === null || e.value === undefined ? "" : ` value=${e.value}`;
+  let requant = "";
+  if (e.requantization) {
+    const r = e.requantization;
+    requant = ` M_o=${r.scale_multiplier} shift=${r.shift} target=${r.target_kind}${r.target_bits}`;
+  }
+  let bias = "";
+  if (e.bias) {
+    bias = ` bias=${e.bias.bias} bias_fmt=${e.bias.format_kind}${e.bias.format_bits}`;
+  }
+  let fifo = "";
+  if (e.lanes) {
+    const lanes = e.lanes.map((lane, index) => {
+      if (!lane.valid) return `L${index}=0/void`;
+      return `L${index}=PE(${lane.row},${lane.col})=${lane.value}`;
+    }).join(" ");
+    fifo = ` dequeue_asserted=${e.dequeue_asserted} lanes=[${lanes}]`;
+  }
+  return `${e.event}${batch}${where}${kval}${value}${bias}${requant}${fifo}`;
+}
+
+function formatPipelineItem(e) {
+  if (e.lanes) {
+    const batch = e.batch === null || e.batch === undefined ? "?" : e.batch;
+    const lanes = e.lanes.map((lane, index) => {
+      if (!lane.valid) return `Bank ${index}: 0 / void`;
+      return `Bank ${index}: PE(${lane.row},${lane.col})=${lane.value}`;
+    }).join(" ");
+    return `B${batch} ${e.event} dequeue_asserted=${e.dequeue_asserted} ${lanes}`;
+  }
+  const row = e.row === null ? "?" : e.row;
+  const col = e.col === null ? "?" : e.col;
+  const batch = e.batch === null || e.batch === undefined ? "?" : e.batch;
+  const value = e.value === null || e.value === undefined ? "X" : e.value;
+  let detail = "";
+  if (e.bias) {
+    detail = ` b=${e.bias.bias} fmt=${e.bias.format_kind}${e.bias.format_bits}`;
+  }
+  if (e.requantization) {
+    const r = e.requantization;
+    detail = ` M=${r.scale_multiplier} s=${r.shift}`;
+  }
+  return `B${batch} PE(${row},${col}) v=${value}${detail}`;
+}
+
+function isSpuFifoEvent(e) {
+  return e.event && e.event.startsWith("spu_output_fifo");
+}
+
+function fifoStageId(e) {
+  return isSpuFifoEvent(e) ? "stage-spu_output_fifo_push" : `stage-${e.event}`;
+}
+
+function renderFifoLane(lane, index) {
+  const slot = document.createElement("div");
+  slot.className = lane.valid ? "fifo-lane" : "fifo-lane void";
+
+  const bank = document.createElement("div");
+  bank.className = "fifo-bank";
+  bank.textContent = `Bank ${index}`;
+  slot.appendChild(bank);
+
+  const location = document.createElement("div");
+  if (lane.valid) {
+    location.textContent = `PE(${lane.row},${lane.col})`;
+  } else {
+    location.textContent = "0 / void";
+  }
+  slot.appendChild(location);
+
+  const value = document.createElement("div");
+  value.textContent = lane.valid ? `v=${lane.value}` : "v=0";
+  slot.appendChild(value);
+
+  return slot;
+}
+
+function renderFifoEntry(e) {
+  const item = document.createElement("div");
+  const kind = e.event.includes("dequeue") ? " dequeue" : "";
+  item.className = `fifo-entry${kind}`;
+
+  const control = document.createElement("div");
+  control.className = "fifo-control";
+
+  const label = document.createElement("span");
+  const batch = e.batch === null || e.batch === undefined ? "?" : e.batch;
+  label.textContent = `B${batch} ${e.event}`;
+  control.appendChild(label);
+
+  const signal = document.createElement("span");
+  signal.className = "fifo-signal";
+  signal.textContent = `dequeue_asserted=${Boolean(e.dequeue_asserted)}`;
+  control.appendChild(signal);
+  item.appendChild(control);
+
+  const lanes = document.createElement("div");
+  lanes.className = "fifo-lanes";
+  lanes.style.setProperty("--fifo-lanes", String((e.lanes || []).length || size));
+  for (const [index, lane] of (e.lanes || []).entries()) {
+    lanes.appendChild(renderFifoLane(lane, index));
+  }
+  item.appendChild(lanes);
+
+  return item;
+}
+
+function fifoOccupancyAtCycle(targetCycle) {
+  const occupancy = [];
+  for (const event of trace) {
+    if ((event.cycle || 0) > targetCycle) continue;
+    if (event.event === "spu_output_fifo_push" && event.lanes && (event.cycle || 0) + 1 <= targetCycle) {
+      occupancy.push(event);
+    } else if (event.event === "spu_output_fifo_dequeue" && occupancy.length) {
+      occupancy.shift();
+    }
+  }
+  return occupancy;
+}
+
+function renderFifoOccupancy(entries) {
+  const host = document.createElement("div");
+  host.className = "fifo-occupancy";
+
+  const title = document.createElement("div");
+  title.className = "fifo-occupancy-title";
+  title.textContent = `FIFO occupancy: ${entries.length} entr${entries.length === 1 ? "y" : "ies"}`;
+  host.appendChild(title);
+
+  if (!entries.length) {
+    const empty = document.createElement("div");
+    empty.className = "stage-empty";
+    empty.textContent = "Empty";
+    host.appendChild(empty);
+    return host;
+  }
+
+  entries.forEach((entry, index) => {
+    const rendered = renderFifoEntry(entry);
+    const label = rendered.querySelector(".fifo-control span");
+    if (label) {
+      const batch = entry.batch === null || entry.batch === undefined ? "?" : entry.batch;
+      label.textContent = `Entry ${index} B${batch}`;
+    }
+    host.appendChild(rendered);
+  });
+  return host;
+}
+
+function render() {
+  cycleInput.value = String(cycle);
+  cycleLabel.textContent = `${cycle} / ${maxCycle}`;
+  document.querySelectorAll(".pe").forEach(pe => {
+    pe.className = "pe";
+    pe.querySelector(".events").innerHTML = "";
+  });
+  document.querySelectorAll(".pipeline-stage").forEach(stage => {
+    if (stage.id === "stage-requant_saturate") {
+      stage.className = "pipeline-stage final";
+    } else if (stage.id === "stage-spu_output_fifo_push") {
+      stage.className = "pipeline-stage fifo-stage";
+    } else {
+      stage.className = "pipeline-stage";
+    }
+    stage.querySelector(".stage-items").innerHTML = "";
+  });
+
+  const events = trace.filter(e => e.cycle === cycle);
+  const sideEvents = [];
+  const fifoStage = document.getElementById("stage-spu_output_fifo_push");
+  if (fifoStage) {
+    const occupancy = fifoOccupancyAtCycle(cycle);
+    if (occupancy.length) fifoStage.classList.add("active");
+    fifoStage.querySelector(".stage-items").appendChild(
+      renderFifoOccupancy(occupancy)
+    );
+  }
+  for (const event of events) {
+    if (event.event.startsWith("requant_") || event.event === "bias_add" || event.event.startsWith("spu_output_fifo")) {
+      const stage = document.getElementById(fifoStageId(event));
+      if (stage) {
+        stage.classList.add("active");
+        let item;
+        if (isSpuFifoEvent(event) && event.lanes) {
+          item = renderFifoEntry(event);
+        } else {
+          item = document.createElement("div");
+          item.className = event.event === "requant_saturate" ? "stage-item final" : "stage-item";
+          item.textContent = formatPipelineItem(event);
+        }
+        stage.querySelector(".stage-items").appendChild(item);
+      } else {
+        sideEvents.push(formatEvent(event));
+      }
+      continue;
+    }
+    if (
+      event.event === "output_emit" &&
+      events.some(e =>
+        e.event === "requant_saturate" &&
+        e.batch === event.batch &&
+        e.row === event.row &&
+        e.col === event.col
+      )
+    ) {
+      continue;
+    }
+    if (event.row === null || event.col === null) {
+      sideEvents.push(formatEvent(event));
+      continue;
+    }
+    const pe = document.getElementById(`pe-${event.row}-${event.col}`);
+    if (!pe) continue;
+    if (event.event.includes("start") || event.event.includes("arrive")) pe.classList.add("active");
+    if (event.event.includes("commit")) pe.classList.add("commit");
+    if (event.event.includes("output")) pe.classList.add("output");
+    if (event.event.includes("shadow")) pe.classList.add("shadow");
+    if (event.event.includes("fifo")) pe.classList.add("fifo");
+    if (event.event.includes("bias")) pe.classList.add("bias");
+    const line = document.createElement("div");
+    line.textContent = formatEvent(event);
+    pe.querySelector(".events").appendChild(line);
+  }
+  document.querySelectorAll(".pipeline-stage").forEach(stage => {
+    const items = stage.querySelector(".stage-items");
+    if (!items.children.length) {
+      const empty = document.createElement("div");
+      empty.className = "stage-empty";
+      empty.textContent = "Idle";
+      items.appendChild(empty);
+    }
+  });
+  streams.textContent = sideEvents.length ? sideEvents.join(" | ") : "No side injections this cycle";
+  eventList.innerHTML = events.length
+    ? events.map(e => `<div>${formatEvent(e)}</div>`).join("")
+    : "<div>No events</div>";
+}
+
+document.getElementById("prev").onclick = () => { cycle = Math.max(0, cycle - 1); render(); };
+document.getElementById("next").onclick = () => { cycle = Math.min(maxCycle, cycle + 1); render(); };
+cycleInput.oninput = () => { cycle = Number(cycleInput.value); render(); };
+document.getElementById("play").onclick = () => {
+  const play = document.getElementById("play");
+  if (timer) {
+    clearInterval(timer);
+    timer = null;
+    play.textContent = "Play";
+    return;
+  }
+  play.textContent = "Pause";
+  timer = setInterval(() => {
+    cycle = cycle >= maxCycle ? 0 : cycle + 1;
+    render();
+  }, Number(document.getElementById("speed").value));
+};
+
+renderMatrix(result.outputs || [], result.output_batches || []);
+render();
+</script>
+</body>
+</html>

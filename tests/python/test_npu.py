@@ -1,3 +1,5 @@
+from importlib.resources import files
+
 import pytest
 
 from npu_sim import (
@@ -9,11 +11,29 @@ from npu_sim import (
     NumericFormatKind,
     PEDataflowMode,
     PEOperandConfig,
+    PipelinePlacement,
     ProcessingElementConfig,
     RequantizationConfig,
     SRAMScratchpadConfig,
     SystolicArrayConfig,
+    VectorProcessingUnitConfig,
 )
+
+
+def test_html_visualization_templates_are_packaged():
+    templates = files("npu_sim.templates")
+
+    systolic_template = templates.joinpath("systolic_array.html").read_text(
+        encoding="utf-8"
+    )
+    vpu_template = templates.joinpath("vpu.html").read_text(encoding="utf-8")
+
+    assert "__TRACE_JSON__" in systolic_template
+    assert "__PIPELINE_STAGES_JSON__" in systolic_template
+    assert "fifo-stage" in systolic_template
+    assert "fifo-lane" in systolic_template
+    assert "fifo-bank" in systolic_template
+    assert "__TRACE_JSON__" in vpu_template
 
 
 def test_npu_constructs_with_default_config():
@@ -90,7 +110,20 @@ def systolic_config(name="array0", dataflow_mode=PEDataflowMode.OUTPUT_STATIONAR
 def test_npu_component_count_includes_systolic_array_pes():
     npu = NPU(NPUConfig(cores=CoreConfig(count=2), systolic_arrays=[systolic_config()]))
 
-    assert npu.stats().component_count == 6
+    assert npu.stats().component_count == 7
+
+
+def test_bias_config_accepts_inside_pe_placement():
+    bias = BiasConfig(
+        enabled=True,
+        bias=[1, -1],
+        placement=PipelinePlacement.INSIDE_PE,
+    )
+
+    assert bias.placement == "inside_pe"
+
+    with pytest.raises(ValueError, match="after_systolic_array or inside_pe"):
+        BiasConfig(enabled=True, placement="after_vpu")
 
 
 def test_npu_runs_debug_pe_and_systolic_array_transactions(tmp_path):
@@ -111,6 +144,9 @@ def test_npu_runs_debug_pe_and_systolic_array_transactions(tmp_path):
                     weight=PEOperandConfig(format=int3),
                     accumulator=acc,
                 )
+            ],
+            vector_processing_units=[
+                VectorProcessingUnitConfig(name="vpu0", enabled=True, lanes=2)
             ],
             systolic_arrays=[
                 systolic_config("array_os"),
@@ -141,6 +177,42 @@ def test_npu_runs_debug_pe_and_systolic_array_transactions(tmp_path):
                         target=fp8,
                         scale_multiplier=0.5,
                         shift=1,
+                    ),
+                ),
+                SystolicArrayConfig(
+                    name="array_vpu_requant",
+                    size=2,
+                    mac_latency_cycles=1,
+                    activation=PEOperandConfig(format=int3),
+                    weight=PEOperandConfig(format=int3),
+                    accumulator=acc,
+                    bias=BiasConfig(enabled=True, bias=[0, -1]),
+                    output_vpu="vpu0",
+                    requantization=RequantizationConfig(
+                        enabled=True,
+                        target=int4,
+                        scale_multiplier=[3, 5],
+                        shift=[1, 2],
+                        placement=PipelinePlacement.AFTER_VPU,
+                    ),
+                ),
+                SystolicArrayConfig(
+                    name="array_inside_pe_bias",
+                    size=2,
+                    mac_latency_cycles=1,
+                    activation=PEOperandConfig(format=int3),
+                    weight=PEOperandConfig(format=int3),
+                    accumulator=acc,
+                    bias=BiasConfig(
+                        enabled=True,
+                        bias=[0, -1],
+                        placement=PipelinePlacement.INSIDE_PE,
+                    ),
+                    requantization=RequantizationConfig(
+                        enabled=True,
+                        target=int4,
+                        scale_multiplier=[3, 5],
+                        shift=[1, 2],
                     ),
                 ),
             ],
@@ -178,7 +250,27 @@ def test_npu_runs_debug_pe_and_systolic_array_transactions(tmp_path):
     assert result["outputs"] == [[4, -1], [7, 2]]
     assert result["operation_count"] == 8
     assert result["dataflow_mode"] == "output_stationary"
-    assert result["current_cycle"] == 6
+    assert result["current_cycle"] == 7
+    fifo_push_cycles = [
+        event["cycle"]
+        for event in result["trace"]
+        if event["event"] == "spu_output_fifo_push"
+    ]
+    fifo_dequeue_request_cycles = [
+        event["cycle"]
+        for event in result["trace"]
+        if event["event"] == "spu_output_fifo_dequeue_request"
+    ]
+    assert fifo_dequeue_request_cycles == [cycle + 1 for cycle in fifo_push_cycles]
+    assert any(
+        event["event"] == "spu_output_fifo_dequeue_request"
+        and not event["dequeue_asserted"]
+        for event in result["trace"]
+    )
+    assert not any(
+        event["event"] == "spu_output_fifo_dequeue"
+        for event in result["trace"]
+    )
 
     inject_counts = {}
     for event in result["trace"]:
@@ -196,6 +288,7 @@ def test_npu_runs_debug_pe_and_systolic_array_transactions(tmp_path):
     assert "Systolic Array Trace" in html
     assert "trace-data" in html
     assert "output_stationary" in html
+    assert "FIFO occupancy" in html
 
     log_path = npu.dump_systolic_array_log(result, tmp_path / "array.log")
     log = log_path.read_text(encoding="utf-8")
@@ -254,6 +347,31 @@ def test_npu_runs_debug_pe_and_systolic_array_transactions(tmp_path):
         for event in stream_result["trace"]
     )
 
+    reused_weight_result = npu.run_systolic_array_stream(
+        "array_ws",
+        activation_batches=[
+            [[1, 2], [3, 1]],
+            [[2, 0], [1, -1]],
+        ],
+        weight_batches=[
+            [[2, 1], [1, -1]],
+        ],
+    )
+
+    assert reused_weight_result["output_batches"] == [
+        [[4, -1], [7, 2]],
+        [[4, 2], [1, 2]],
+    ]
+    assert any(
+        event["event"] == "stationary_weight_reuse" and event["batch"] == 1
+        for event in reused_weight_result["trace"]
+    )
+    assert not any(
+        event["event"] in {"weight_fifo_push", "weight_fifo_pop"}
+        and event["batch"] == 1
+        for event in reused_weight_result["trace"]
+    )
+
     requant_result = npu.run_systolic_array(
         "array_requant",
         activations=[[1, 2], [3, 1]],
@@ -289,7 +407,7 @@ def test_npu_runs_debug_pe_and_systolic_array_transactions(tmp_path):
         and event["col"] == 0
     )
     assert pre_requant["value"] == 7
-    assert final_emit["cycle"] == pre_requant["cycle"] + 5
+    assert final_emit["cycle"] == pre_requant["cycle"] + 6
     assert any(
         event["event"] == "requant_multiply"
         and event["requantization"]["scale_multiplier"] == 5
@@ -352,6 +470,148 @@ def test_npu_runs_debug_pe_and_systolic_array_transactions(tmp_path):
     )
 
     assert fp8_result["outputs"] == [[1.0, -0.25], [1.75, 0.5]]
+
+    after_vpu_result = npu.run_systolic_array(
+        "array_vpu_requant",
+        activations=[[1, 2], [3, 1]],
+        weights=[[2, 1], [1, -1]],
+    )
+
+    assert after_vpu_result["outputs"] == [[6, -2], [7, 1]]
+    assert any(
+        event["event"] == "spu_output_fifo_push"
+        for event in after_vpu_result["trace"]
+    )
+    fifo_pushes = [
+        event
+        for event in after_vpu_result["trace"]
+        if event["event"] == "spu_output_fifo_push"
+    ]
+    assert all(len(event["lanes"]) == after_vpu_result["size"] for event in fifo_pushes)
+    assert any(
+        not lane["valid"] and lane["value"] == 0
+        for event in fifo_pushes
+        for lane in event["lanes"]
+    )
+    fifo_push_cycles = [event["cycle"] for event in fifo_pushes]
+    assert len(fifo_push_cycles) == len(set(fifo_push_cycles))
+    fifo_dequeue_request_cycles = [
+        event["cycle"]
+        for event in after_vpu_result["trace"]
+        if event["event"] == "spu_output_fifo_dequeue_request"
+    ]
+    assert fifo_dequeue_request_cycles == [cycle + 1 for cycle in fifo_push_cycles]
+    assert any(
+        event["event"] == "spu_output_fifo_dequeue_request"
+        and event["dequeue_asserted"]
+        for event in after_vpu_result["trace"]
+    )
+    assert any(
+        event["event"] == "spu_output_fifo_dequeue"
+        and event["dequeue_asserted"]
+        for event in after_vpu_result["trace"]
+    )
+    assert not any(
+        event["event"] == "spu_output_fifo_empty"
+        for event in after_vpu_result["trace"]
+    )
+    assert any(
+        event["event"] == "vpu_pass_through"
+        for event in after_vpu_result["trace"]
+    )
+    assert any(
+        event["event"] == "requant_shift"
+        and event["requantization"]["placement"] == "after_vpu"
+        for event in after_vpu_result["trace"]
+    )
+    assert not any(
+        event["event"] == "pre_requant_output"
+        for event in after_vpu_result["trace"]
+    )
+
+    systolic_after_vpu_html = npu.visualize_systolic_array(
+        after_vpu_result, tmp_path / "after_vpu_systolic.html"
+    ).read_text(encoding="utf-8")
+    assert "spu_output_fifo_push" in systolic_after_vpu_html
+    assert "spu_output_fifo_dequeue_request" in systolic_after_vpu_html
+    assert "spu_output_fifo_dequeue" in systolic_after_vpu_html
+    assert "dequeue_asserted" in systolic_after_vpu_html
+    assert "lanes" in systolic_after_vpu_html
+    assert "fifo-stage" in systolic_after_vpu_html
+    assert "FIFO occupancy" in systolic_after_vpu_html
+    assert "fifo-lane" in systolic_after_vpu_html
+    assert "fifo-bank" in systolic_after_vpu_html
+    assert "0 / void" in systolic_after_vpu_html
+    assert "PE(?,?) v=X" not in systolic_after_vpu_html
+    assert "spu_output_fifo_pop" not in systolic_after_vpu_html
+    assert "vpu_pass_through" not in systolic_after_vpu_html
+    assert "requant_multiply" not in systolic_after_vpu_html
+
+    vpu_html = npu.visualize_vpu(
+        after_vpu_result, tmp_path / "vpu.html"
+    ).read_text(encoding="utf-8")
+    assert "VPU Trace" in vpu_html
+    assert "vpu_pass_through" in vpu_html
+    assert "requant_multiply" in vpu_html
+
+    vpu_log = npu.dump_vpu_log(
+        after_vpu_result, tmp_path / "vpu.log"
+    ).read_text(encoding="utf-8")
+    assert "VPU Cycle Log" in vpu_log
+    assert "placement=after_vpu" in vpu_log
+
+    inside_pe_result = npu.run_systolic_array(
+        "array_inside_pe_bias",
+        activations=[[1, 2], [3, 1]],
+        weights=[[2, 1], [1, -1]],
+    )
+
+    assert inside_pe_result["outputs"] == requant_result["outputs"]
+    inside_pe_events = [event["event"] for event in inside_pe_result["trace"]]
+    assert "bias_accumulator_seed" in inside_pe_events
+    assert "bias_register_load" in inside_pe_events
+    assert "bias_fifo_push" in inside_pe_events
+    assert "bias_fifo_pop" in inside_pe_events
+    assert "bias_add" not in inside_pe_events
+    assert any(
+        event["event"] == "bias_accumulator_seed"
+        and event["bias"]["placement"] == "inside_pe"
+        and event["bias"]["format_bits"] == 16
+        for event in inside_pe_result["trace"]
+    )
+    inside_pe_base_cycle = next(
+        event["cycle"]
+        for event in inside_pe_result["trace"]
+        if event["event"] == "mac_start"
+        and event["row"] == 0
+        and event["col"] == 0
+        and event["k"] == 0
+    )
+    assert [
+        event["cycle"]
+        for event in inside_pe_result["trace"]
+        if event["event"] == "bias_fifo_push" and event["row"] is None
+    ] == [inside_pe_base_cycle, inside_pe_base_cycle + 1]
+    assert any(
+        event["event"] == "bias_accumulator_seed"
+        and event["row"] == 1
+        and event["col"] == 1
+        and event["cycle"] == inside_pe_base_cycle + 2
+        for event in inside_pe_result["trace"]
+    )
+
+    inside_pe_html = npu.visualize_systolic_array(
+        inside_pe_result, tmp_path / "inside_pe.html"
+    ).read_text(encoding="utf-8")
+    assert "bias_accumulator_seed" in inside_pe_html
+    assert "bias_register_load" in inside_pe_html
+    assert "stage-bias_add" not in inside_pe_html
+
+    inside_pe_log = npu.dump_systolic_array_log(
+        inside_pe_result, tmp_path / "inside_pe.log"
+    ).read_text(encoding="utf-8")
+    assert "bias_accumulator_seed" in inside_pe_log
+    assert "bias_add" not in inside_pe_log
 
 
 def test_npu_run_advances_cycles():
